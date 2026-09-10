@@ -96,7 +96,7 @@ def test_reconcile_logs_amount_when_confirming_a_stuck_melt(
     pr = fake_invoice(5000)
     client.get(f"/w/cb?k1={k1}&pr={pr}")
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
 
     node.is_payment_complete_raises = False
     node.payment_actually_completed = True

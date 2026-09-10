@@ -23,6 +23,7 @@ a reference wallet implementation (hosted at
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
 | `GET /.well-known/lnurlw/{username}` | **Theoretical/experimental**: withdraw-side mirror of the LUD-16 address - informational only, see below |
+| `GET /register`  | [LUD-25](../luds/25.md) Part 2: claims a `{username}` for a WALLET's own `cx1` branch, so paying its lightning address auto-mints - see "Wallet-side ownership proofs" below |
 
 **Bare-domain address** ([LUD-16](../luds/16.md)): both well-known aliases
 above also answer for the reserved username `_`, alongside the configured
@@ -42,9 +43,9 @@ Callback semantics (`/w/cb`):
 | `k1`  | `pr` | `amount` | Result                                                    |
 |-------|------|----------|-----------------------------------------------------------|
 | one   | yes  | –        | melt: note reserved, OK (plus `pr`/`verify` if verify is enabled) returned immediately, `pr` (of exactly its value) paid asynchronously, burned once settled |
-| one   | no   | no       | rotate: burned, a note keyed by `h` (of the same value) minted |
-| one or many | no | yes | split: all burned, two notes minted - `amount` keyed by `h`, the remainder keyed by `h2` |
-| many  | no   | –        | merge: all burned, one note worth the sum minted, keyed by `h` |
+| one   | no   | no       | rotate: burned, a note keyed by `p1` (of the same value) minted |
+| one or many | no | yes | split: all burned, two notes minted - `amount` keyed by `p1`, the remainder keyed by `p2` |
+| many  | no   | –        | merge: all burned, one note worth the sum minted, keyed by `p1` |
 
 `pr` MUST NOT be combined with multiple `k1`s or with `amount`, melt several notes
 by merging them first. The informational endpoint's response always echoes the
@@ -53,17 +54,24 @@ query param if present, notes may encode a wallet-declared value in their URL
 (`?k1=...&amount=...`) for offline display, but it is never authoritative;
 `maxWithdrawable` is.
 
-**`h`/`h2`** ([LUD-25](../luds/25.md)): whenever `pr` is absent (rotate, split,
+**`p1`/`p2`** ([LUD-25](../luds/25.md)): whenever `pr` is absent (rotate, split,
 or merge), the caller (`WALLET`) - never this mint - generates the replacement
 note's secret, a fresh random preimage, and discloses only its sha256 hash as
-`h` (and, for a split's change note, `h2`). This mint registers the new note
-under that hash directly and never sees, generates, or persists the underlying
-preimage - the callback response for these carries no secret at all, just
-`{"status": "OK"}` (plus `sig`/`sig2` if offline verification is configured,
-see below). `h` is required whenever `pr` is absent; `h2` is additionally
-required whenever `amount` is too. A missing or malformed one fails with
-`{"status": "ERROR", "reason": "missing h"}` (or `"missing h2"`) rather than
-this mint generating a secret on `WALLET`'s behalf.
+`p1` (and, for a split's change note, `p2`) - or, for a Part 2 `cp1` note (see
+"Wallet-side ownership proofs" below), the new note's public key directly,
+same field. This mint registers the new note under that value directly and
+never sees, generates, or persists the underlying preimage - the callback
+response for these carries no secret at all, just `{"status": "OK"}` (plus
+`sig`/`sig2` if offline verification is configured, see below). `p1` is
+required whenever `pr` is absent; `p2` is additionally required whenever
+`amount` is too. A missing or malformed one fails with `{"status": "ERROR",
+"reason": "missing p1"}` (or `"missing p2"`) rather than this mint generating
+a secret on `WALLET`'s behalf.
+
+`h`/`h2` (on `/w/cb`) and `h` (on `/w`) are `p1`/`p2`/`p`'s old names, from
+before the spec renamed them - still accepted for a WALLET that hasn't
+caught up, equivalent in every way, just an older spelling. If both a field
+and its old name are given, the new name wins.
 
 Per the spec, `/w/cb` replies `{"status": "OK"}` for a melt as soon as the note
 is reserved, then pays `pr` asynchronously in the background - it does not wait
@@ -79,7 +87,7 @@ reported back through this callback - only observable as the note becoming
 spendable again.
 
 No spendable secret is ever persisted or, for a rotate/split/merge, even seen
-by this mint at all: notes are stored keyed by `sha256(k1)` - `h`/`h2` above,
+by this mint at all: notes are stored keyed by `sha256(k1)` - `p1`/`p2` above,
 supplied by `WALLET` directly - and for a freshly minted note that id is
 exactly the payment hash of the invoice that funded it, so the preimage is
 discarded at invoice-creation time. The spec also asks `SERVICE` not to log query strings on the withdraw
@@ -114,7 +122,7 @@ have. Off by default.
 **Offline verification** (optional): if a funding source is configured, `GET
 /w` advertises a `mintPubkey` - that node's own identity, the same key
 it signs BOLT-11 invoices with - and rotate/split/merge responses carry a
-recoverable `sig`/`sig2` over each new note's hash (`h`/`h2`, supplied by
+recoverable `sig`/`sig2` over each new note's hash (`p1`/`p2`, supplied by
 `WALLET` - this mint signs exactly what it was given, never a secret it
 derived itself), letting a holder verify a note's issuer and amount without
 contacting the mint (see `signing.py`). Notes are signed via the funding source's own signmessage RPC
@@ -136,6 +144,52 @@ There's no separate setting for this: without a funding
 source, both fields are simply omitted, same as any other unconfigured
 optional field, and signing failures (e.g. a briefly unreachable node) are
 swallowed rather than failing the rotate/split/merge itself.
+
+**Wallet-side ownership proofs** ([LUD-25](../luds/25.md) Part 2, optional):
+a note may be keyed by a public key instead of a hash, spent by a
+recoverable signature instead of a revealed preimage - purely additive on
+top of everything above, a `SERVICE`/`WALLET` implementing only Part 1
+interoperates fully with one that also implements this. Four bech32m
+(BIP-350) encodings, each fitting the exact same fields Part 1 already
+uses:
+
+- **`cp1<pk>`** - a note's 32-byte x-only public key, in place of a hash-
+  of-preimage. Goes wherever Part 1 put a hash: `comment` on `/p/cb`
+  (minting) and `p1`/`p2` on `/w/cb` (rotate/split/merge output).
+- **`ck1<sig>`** - a recoverable signature with the note's own key, over
+  one fixed message - the actual bearer secret for a `cp1` note, submitted
+  as `k1` to redeem *or* to check a note informationally (there's only
+  ever the one `ck1` per note). This mint recovers the signer's public key
+  (`ecrecover`) and looks that up the same way it looks up a plain hex
+  `k1` - a bare `cp1` public key is deliberately never enough to redeem
+  anything on its own, only a `ck1` signature is. A merge may freely mix
+  legacy hex `k1`s and `ck1`s in one request.
+- **`cs1<sig>`** - this mint's own issuance certificate for a `cp1` note
+  (same offline-verification signing key as above, over the note's public
+  key and amount instead of a hash) - returned as `sig`/`sig2` alongside
+  every mint/rotate/split/merge of a `cp1` note, and on the informational
+  `GET /w?k1=<ck1>` too, so a holder can verify a note it was just handed
+  without contacting this mint at all.
+- **`cx1<P || chain_code>`** - a WALLET's watch-only export of its whole
+  derivation branch for this mint (non-hardened, so every note's public
+  key is computable from `cx1` alone, never its private key) - see
+  `/register` below.
+
+**cx1 registration & lightning-address auto-mint** (`GET /register`): a
+WALLET claims `?username=` against its own `?cx1=`, first-come-first-served,
+no proof of possession required - `cx1` alone never grants spending, only a
+note's own private key does, so a squatted registration only costs the real
+owner a friendly name, never funds. Once registered, paying
+`{username}@{BASE_URL host}` with **no `comment`** auto-mints a fresh `cp1`
+note directly on that branch (this mint derives the next unused key itself -
+`NoteStore.claim_next_index`, skipping any index already outstanding or
+spent, guarding the same race the spec's Seed & derivation describes) - no
+per-payment WALLET involvement needed at all. The payer's WALLET can still
+supply its own `comment=cp1<pk>` instead (e.g. the address owner minting for
+themselves with a specific key already in hand), which is honored as-is.
+Set `USERNAME_REGISTRATION_ENABLED=false` to turn this off entirely (404,
+same off-switch convention as `VERIFY_ENABLED`) - this mint's own fixed
+identity (`USERNAME`/the bare-domain `_`) is never affected either way.
 
 **Verify** (optional, [LUD-21](../luds/21.md)): set `VERIFY_ENABLED=true` to
 serve `/verify/{payment_hash}` and advertise a `verify` URL in `/p/cb`'s

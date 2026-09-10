@@ -37,13 +37,21 @@ def lightning_signed_message_digest(message: str) -> bytes:
 
 
 def _message(note_id_hex: str, amount_msat: int) -> str:
-    """The message a note's signature commits to. `note_id_hex` is
-    sha256(k1) hex-encoded, never k1 itself - per LUD-25 it's exactly the
-    `h`/`h2` a WALLET discloses on a rotate/split/merge callback (this
-    mint's own note storage id, too), so a holder can prove issuance
-    (e.g. to expose a mint that won't honor its own note) without
+    """The message a note's signature commits to. For a Part 1 note,
+    `note_id_hex` is sha256(k1) hex-encoded, never k1 itself - per LUD-25
+    it's exactly the `p1`/`p2` a WALLET discloses on a rotate/split/merge
+    callback (this mint's own note storage id, too), so a holder can prove
+    issuance (e.g. to expose a mint that won't honor its own note) without
     revealing the spend secret, and this mint never needs to hash a raw
-    secret to produce or verify a signature - it never has one to hash."""
+    secret to produce or verify a signature - it never has one to hash.
+
+    For a Part 2 `cp1` note, `note_id_hex` is instead the note's raw
+    32-byte public key, hex - per 25.md's Offline verification, `hex(pk)`
+    is signed directly, no hashing needed, since a public key is already a
+    non-revealing commitment. This function's message format
+    ("LNURLcash:<amount>:<id>") is bit-identical either way; only what the
+    caller passes as `note_id_hex` differs, and only the caller (router.py)
+    needs to know which kind of note it's signing for."""
     return f"{_DOMAIN_TAG}:{amount_msat}:{note_id_hex}"
 
 
@@ -80,7 +88,7 @@ async def sign_note(note_id_hex: str, amount_msat: int, config: LightningBackend
     Offline verification, signed by the funding source node's own
     signmessage RPC, as 65 bytes (r, then s, then recovery id),
     hex-encoded. `note_id_hex` is the note's own hash - per LUD-25, the
-    `h`/`h2` a WALLET generated and disclosed for a rotate/split/merge, so
+    `p1`/`p2` a WALLET generated and disclosed for a rotate/split/merge, so
     this mint signs exactly what it was given, never a secret it derived
     itself. The signmessage RPC itself returns recovery-id-leading bytes;
     per LUD-25 those are reordered here into r ‖ s ‖ recovery-id before
@@ -108,7 +116,7 @@ def verify_note(pubkey_hex: str, note_id_hex: str, amount_msat: int, signature_h
     """Verifies a signature produced by sign_note against a mintPubkey - the
     check a WALLET performs offline, by reconstructing the same "Lightning
     Signed Message" digest lnd/cln computed internally when signing.
-    `note_id_hex` is the note's hash (sha256(k1), hex) - the `h`/`h2` a
+    `note_id_hex` is the note's hash (sha256(k1), hex) - the `p1`/`p2` a
     real WALLET would already have on hand, since it generated the
     secret itself. This mint never calls it itself; it exists for the
     test suite to confirm sign_note produces what the spec's algorithm
@@ -117,3 +125,29 @@ def verify_note(pubkey_hex: str, note_id_hex: str, amount_msat: int, signature_h
     digest = lightning_signed_message_digest(_message(note_id_hex, amount_msat))
     recovered = PublicKey.from_signature_and_message(signature, digest, hasher=None)
     return recovered.format(compressed=True).hex() == pubkey_hex
+
+
+# LUD-25 Part 2, Encoding: a `ck1` is a WALLET's signature with a `cp1`
+# note's own sk, over this one fixed message - unlike `cs1` (per-note,
+# amount-and-pubkey-bound, see _message/sign_note), the same `ck1` value is
+# reused everywhere that note's secret is needed, redemption included, so
+# the message it signs can never depend on anything about the note itself.
+# Precomputed once: every ck1 recovery reuses the identical digest.
+_CK1_FIXED_DIGEST = lightning_signed_message_digest("LNURLcash")
+
+
+def recover_note_pubkey(signature_hex: str) -> bytes:
+    """Recovers the 32-byte x-only public key a `ck1` signature was
+    produced with - router.py's redemption-side counterpart to
+    Wallet-side ownership proofs' `ecrecover(digest, sig) -> pk_i`. Unlike
+    verify_note (which compares a recovered key to one already known),
+    this is a pure recovery: the caller has no prior claim about which
+    note `signature_hex` belongs to, only the raw signature a request
+    supplied as `k1` - the recovered key's x-coordinate IS the note id to
+    look up. Raises ValueError on a malformed signature (wrong length, or
+    one that doesn't recover to a valid point) - the same way a malformed
+    legacy k1 fails HEX32_PATTERN, left to the caller to turn into the
+    ordinary "invalid k1" response."""
+    signature = bytes.fromhex(signature_hex)
+    recovered = PublicKey.from_signature_and_message(signature, _CK1_FIXED_DIGEST, hasher=None)
+    return recovered.format(compressed=True)[1:]

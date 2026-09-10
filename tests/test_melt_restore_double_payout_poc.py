@@ -167,7 +167,7 @@ def test_variant_a_ambiguous_failure_leaves_the_note_pending_not_restored(hodl_c
     assert hodl.is_payment_complete_calls == 1  # confirmation consulted...
     assert outstanding(k1) == VALUE  # ...still outstanding, but frozen:
     _, h = fresh_secret()
-    assert hodl_client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
+    assert hodl_client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
 
     hodl.settle_hodl_payments()  # reality: funds leave the node now
 
@@ -194,7 +194,7 @@ def test_variant_b_payment_failed_is_still_confirmed_before_restoring(hodl_clien
     assert hodl.is_payment_complete_calls == 1  # confirmation is no longer skipped
     assert outstanding(k1) == VALUE  # still outstanding, but frozen:
     _, h = fresh_secret()
-    assert hodl_client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
+    assert hodl_client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
 
     hodl.settle_hodl_payments()  # the "definitively failed" payment settles late
 

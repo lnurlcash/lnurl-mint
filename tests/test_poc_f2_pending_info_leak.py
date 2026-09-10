@@ -54,7 +54,7 @@ def test_w_reports_pending_during_melt_window(client: TestClient, node, mint_not
                 await asyncio.sleep(0.05)  # let the melt reach mark_pending + background pay
                 probes["w"] = (await ac.get(f"/w?k1={k1}")).json()
                 _, h = fresh_secret()
-                probes["rotate"] = (await ac.get(f"/w/cb?k1={k1}&h={h}")).json()
+                probes["rotate"] = (await ac.get(f"/w/cb?k1={k1}&p1={h}")).json()
 
             return await asyncio.gather(melt(), probe())
 

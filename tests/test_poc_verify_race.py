@@ -76,14 +76,14 @@ def test_theft_chain_closed_because_comment_makes_the_preimage_harmless(
 
     # ...but it redeems nothing - it was never the note's k1 to begin with
     _, attacker_h = fresh_secret()
-    r = client.get(f"/w/cb?k1={stolen_preimage}&h={attacker_h}")
+    r = client.get(f"/w/cb?k1={stolen_preimage}&p1={attacker_h}")
     assert r.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}
     assert notes.note_amount(attacker_h) is None
 
     # only the victim's own held secret redeems the note, at their leisure -
     # no race to win, since nobody else ever had anything that worked
     _, victim_h = fresh_secret()
-    r = client.get(f"/w/cb?k1={victim_secret}&h={victim_h}")
+    r = client.get(f"/w/cb?k1={victim_secret}&p1={victim_h}")
     assert r.json()["status"] == "OK", r.text
     assert notes.note_amount(victim_h) == 50_000
 
@@ -135,11 +135,11 @@ def test_melt_direction_verify_is_harmless(client: TestClient, node: FakeNode, m
     assert notes.note_amount(melt_ph) is None
     assert notes.mint_pr(melt_ph) is None
     _, attacker_h = fresh_secret()
-    r = client.get(f"/w/cb?k1={melt_preimage}&h={attacker_h}")
+    r = client.get(f"/w/cb?k1={melt_preimage}&p1={attacker_h}")
     assert r.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}
     assert notes.note_amount(attacker_h) is None
     # and the original note's secret is equally dead (already burned)
-    r = client.get(f"/w/cb?k1={k1}&h={attacker_h}")
+    r = client.get(f"/w/cb?k1={k1}&p1={attacker_h}")
     assert r.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}
 
 
@@ -160,6 +160,6 @@ def test_verify_disabled_closes_the_hole(client: TestClient, node: FakeNode):
 
     # ...and the victim rotates at human speed, unhurried and unrobbed
     _, victim_h = fresh_secret()
-    r = client.get(f"/w/cb?k1={victim_secret}&h={victim_h}")
+    r = client.get(f"/w/cb?k1={victim_secret}&p1={victim_h}")
     assert r.json()["status"] == "OK", r.text
     assert notes.note_amount(victim_h) == 50_000

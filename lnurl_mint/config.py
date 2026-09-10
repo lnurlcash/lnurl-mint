@@ -139,6 +139,15 @@ class Settings(BaseSettings):
     # preimage is a bearer secret here, not mere proof of payment.
     verify_enabled: bool = True
 
+    # LUD-25 Part 2 (optional): serve /register, letting a WALLET claim a
+    # Lightning Address username against its own cx1 branch (see
+    # router.register_username) - this mint then auto-mints for every
+    # payment it receives there, no per-payment WALLET involvement needed.
+    # Off disables the endpoint entirely (404), same off-switch convention
+    # as verify_enabled, for an operator who wants this mint to stay a
+    # single fixed identity, never a multi-tenant one.
+    username_registration_enabled: bool = True
+
     # the one-pager frontend (GET /)
     title: str = "lnurl-mint"
     description: str = "A minimal lnurlcash mint - pay the QR code to mint a Lightning bearer note."

@@ -22,7 +22,7 @@ def _leave_a_note_pending(client: TestClient, node: FakeNode, mint_note, amount_
     pr = fake_invoice(amount_msat)
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
     return k1
 
 
@@ -47,7 +47,7 @@ def test_reconcile_restores_a_pending_note_once_confirmed_not_paid(client: TestC
     assert client.get(f"/w?k1={k1}").json()["maxWithdrawable"] == 5000
     # no longer pending - a fresh melt is accepted again
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json()["status"] == "OK"
 
 
 def test_reconcile_leaves_still_unconfirmable_notes_pending_without_retrying(
@@ -63,7 +63,7 @@ def test_reconcile_leaves_still_unconfirmable_notes_pending_without_retrying(
 
     assert node.is_payment_complete_calls == 1
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
 
 
 def test_reconcile_writes_still_unconfirmed_notes_to_error_log(
@@ -126,7 +126,7 @@ def test_periodic_monitor_reconciles_a_note_that_resolves_after_boot(
         # still unresolvable when this process boots - matches the state
         # the note was left in
         _, h = fresh_secret()
-        assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
+        assert client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
 
         # only now does the underlying payment become confirmable - no
         # further boot happens, only the periodic monitor's own later tick

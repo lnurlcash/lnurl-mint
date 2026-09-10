@@ -102,7 +102,7 @@ def test_verify_stays_settled_after_the_note_is_spent(client: TestClient, node, 
     assert result["preimage"] == preimage
 
     _, h = fresh_secret()
-    rotated = client.get(f"/w/cb?k1={secret}&h={h}").json()
+    rotated = client.get(f"/w/cb?k1={secret}&p1={h}").json()
     assert rotated["status"] == "OK"
 
     result = client.get(f"/verify/{payment_hash}").json()

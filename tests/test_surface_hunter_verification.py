@@ -53,7 +53,7 @@ def test_p3_rotate_onto_pending_mint_is_rejected(client: TestClient, node: FakeN
     assert notes.pending_mint(victim_ph) is not None
 
     # the squat is rejected atomically - nothing planted, nothing burned
-    resp = client.get(f"/w/cb?k1={attacker_k1}&h={victim_ph}")
+    resp = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_ph}")
     assert resp.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}, resp.text
     assert notes.note_amount(victim_ph) is None
     attacker_id = sha256(bytes.fromhex(attacker_k1)).hexdigest()
@@ -100,12 +100,12 @@ def test_p1b_verify_is_harmless_once_comment_protection_is_used(client: TestClie
 
     # the stolen preimage redeems nothing - it was never the note's k1
     _, attacker_h = fresh_secret()
-    rotate = client.get(f"/w/cb?k1={stolen['preimage']}&h={attacker_h}")
+    rotate = client.get(f"/w/cb?k1={stolen['preimage']}&p1={attacker_h}")
     assert rotate.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}
 
     # only the WALLET-held secret does
     _, victim_h = fresh_secret()
-    rotate = client.get(f"/w/cb?k1={secret}&h={victim_h}")
+    rotate = client.get(f"/w/cb?k1={secret}&p1={victim_h}")
     assert rotate.json()["status"] == "OK", rotate.text
 
 

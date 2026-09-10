@@ -172,7 +172,7 @@ def test_verify_url_ignores_a_spoofed_host_header(client: TestClient, monkeypatc
 def test_rotate_burns_and_replaces_the_note(client: TestClient, mint_note):
     k1 = mint_note(5000)
     new_k1, h = fresh_secret()
-    data = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     assert data["status"] == "OK"
     # LUD-25: WALLET generates the replacement itself - this mint has
     # nothing further to hand back for it, just status (+ sig, untested here)
@@ -185,7 +185,7 @@ def test_split_mints_amount_and_change(client: TestClient, mint_note):
     k1 = mint_note(5000)
     new_k1, h = fresh_secret()
     change_k1, h2 = fresh_secret()
-    data = client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}").json()
+    data = client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}").json()
     assert data["status"] == "OK"
     assert note_value(client, k1) is None
     assert note_value(client, new_k1) == 2000
@@ -198,7 +198,7 @@ def test_split_merges_multiple_k1s_first(client: TestClient, mint_note):
     a, b = mint_note(2000), mint_note(3000)
     new_k1, h = fresh_secret()
     change_k1, h2 = fresh_secret()
-    data = client.get(f"/w/cb?k1={a}&k1={b}&amount=1000&h={h}&h2={h2}").json()
+    data = client.get(f"/w/cb?k1={a}&k1={b}&amount=1000&p1={h}&p2={h2}").json()
     assert data["status"] == "OK"
     assert note_value(client, a) is None
     assert note_value(client, b) is None
@@ -211,7 +211,7 @@ def test_split_rejects_amount_out_of_range(client: TestClient, mint_note):
     _, h = fresh_secret()
     _, h2 = fresh_secret()
     for amount in (0, 5000, 6000):
-        assert client.get(f"/w/cb?k1={k1}&amount={amount}&h={h}&h2={h2}").json()["status"] == "ERROR"
+        assert client.get(f"/w/cb?k1={k1}&amount={amount}&p1={h}&p2={h2}").json()["status"] == "ERROR"
     assert note_value(client, k1) == 5000
 
 
@@ -220,7 +220,7 @@ def test_split_rejects_while_sunsetting(client: TestClient, mint_note, monkeypat
     monkeypatch.setattr(settings, "sunset_mint", True)
     _, h = fresh_secret()
     _, h2 = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}").json()["status"] == "ERROR"
+    assert client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}").json()["status"] == "ERROR"
     assert note_value(client, k1) == 5000  # rejected before anything was burned
 
 
@@ -230,11 +230,11 @@ def test_rotate_merge_and_melt_are_unaffected_by_sunsetting(client: TestClient, 
     monkeypatch.setattr(settings, "sunset_mint", True)
 
     new_a, h_a = fresh_secret()
-    assert client.get(f"/w/cb?k1={a}&h={h_a}").json()["status"] == "OK"  # rotate
+    assert client.get(f"/w/cb?k1={a}&p1={h_a}").json()["status"] == "OK"  # rotate
     assert note_value(client, new_a) == 2000
 
     new_bc, h_bc = fresh_secret()
-    assert client.get(f"/w/cb?k1={b}&k1={c}&h={h_bc}").json()["status"] == "OK"  # merge
+    assert client.get(f"/w/cb?k1={b}&k1={c}&p1={h_bc}").json()["status"] == "OK"  # merge
     assert note_value(client, new_bc) == 7000
 
     pr = fake_invoice(7000)
@@ -245,7 +245,7 @@ def test_rotate_merge_and_melt_are_unaffected_by_sunsetting(client: TestClient, 
 def test_merge_burns_all_and_mints_the_sum(client: TestClient, mint_note):
     a, b = mint_note(2000), mint_note(3000)
     new_k1, h = fresh_secret()
-    data = client.get(f"/w/cb?k1={a}&k1={b}&h={h}").json()
+    data = client.get(f"/w/cb?k1={a}&k1={b}&p1={h}").json()
     assert data["status"] == "OK"
     assert note_value(client, a) is None
     assert note_value(client, b) is None
@@ -260,7 +260,7 @@ def test_split_deducts_base_fee_from_change_when_mint_charges_fees(client: TestC
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
     new_k1, h = fresh_secret()
     change_k1, h2 = fresh_secret()
-    data = client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}").json()
+    data = client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}").json()
     assert data["status"] == "OK"
     assert note_value(client, new_k1) == 2000
     assert note_value(client, change_k1) == 3000 - 1000
@@ -274,7 +274,7 @@ def test_split_does_not_reapply_fee_percent_ppm(client: TestClient, mint_note, m
     monkeypatch.setattr(settings, "fee_percent_ppm", 500_000)  # 50%, if it were (wrongly) reapplied
     _, h = fresh_secret()
     change_k1, h2 = fresh_secret()
-    data = client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}").json()
+    data = client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}").json()
     assert data["status"] == "OK"
     assert note_value(client, change_k1) == 3000
 
@@ -285,7 +285,7 @@ def test_split_rejects_when_change_cannot_cover_the_base_fee(client: TestClient,
     _, h = fresh_secret()
     _, h2 = fresh_secret()
     # amount=4500 leaves change worth 500 before the fee - can't cover it
-    result = client.get(f"/w/cb?k1={k1}&amount=4500&h={h}&h2={h2}").json()
+    result = client.get(f"/w/cb?k1={k1}&amount=4500&p1={h}&p2={h2}").json()
     assert result == {"status": "ERROR", "reason": "insufficient value"}
     # rejected outright - the note is untouched, not partially burned
     assert note_value(client, k1) == 5000
@@ -305,7 +305,7 @@ def test_split_rejects_a_zero_value_change_note(client: TestClient, mint_note, m
     _, h2 = fresh_secret()
     # amount=3000 leaves change worth exactly 2000 before the fee -
     # base_fee_msat (2000) would consume all of it, leaving 0
-    result = client.get(f"/w/cb?k1={k1}&amount=3000&h={h}&h2={h2}").json()
+    result = client.get(f"/w/cb?k1={k1}&amount=3000&p1={h}&p2={h2}").json()
     assert result == {"status": "ERROR", "reason": "insufficient value"}
     assert note_value(client, k1) == 5000
 
@@ -321,7 +321,7 @@ def test_split_ignores_min_mint_msat_on_both_sides(client: TestClient, mint_note
     monkeypatch.setattr(settings, "min_mint_msat", 10_000)
     new_k1, h = fresh_secret()
     change_k1, h2 = fresh_secret()
-    data = client.get(f"/w/cb?k1={k1}&amount=1&h={h}&h2={h2}").json()
+    data = client.get(f"/w/cb?k1={k1}&amount=1&p1={h}&p2={h2}").json()
     assert data["status"] == "OK"
     assert note_value(client, new_k1) == 1
     assert note_value(client, change_k1) == 4999
@@ -334,7 +334,7 @@ def test_merge_refunds_base_fee_for_every_extra_note(client: TestClient, mint_no
     a, b, c = mint_note(2000), mint_note(3000), mint_note(1000)
     monkeypatch.setattr(settings, "base_fee_msat", 500)
     new_k1, h = fresh_secret()
-    data = client.get(f"/w/cb?k1={a}&k1={b}&k1={c}&h={h}").json()
+    data = client.get(f"/w/cb?k1={a}&k1={b}&k1={c}&p1={h}").json()
     assert data["status"] == "OK"
     assert note_value(client, new_k1) == 2000 + 3000 + 1000 + 2 * 500
 
@@ -345,7 +345,7 @@ def test_rotate_is_unaffected_by_mint_fees(client: TestClient, mint_note, monkey
     k1 = mint_note(5000)
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
     new_k1, h = fresh_secret()
-    data = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     assert data["status"] == "OK"
     assert note_value(client, new_k1) == 5000
 
@@ -357,8 +357,8 @@ def test_retried_rotate_replays_the_original_result(client: TestClient, mint_not
     # ask WALLET first
     k1 = mint_note(5000)
     new_k1, h = fresh_secret()
-    first = client.get(f"/w/cb?k1={k1}&h={h}").json()
-    second = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    first = client.get(f"/w/cb?k1={k1}&p1={h}").json()
+    second = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     assert first["status"] == "OK"
     assert second == first
     # still exactly one outstanding note from this rotate, not a second one
@@ -369,8 +369,8 @@ def test_retried_split_replays_the_original_result(client: TestClient, mint_note
     k1 = mint_note(5000)
     new_k1, h = fresh_secret()
     change_k1, h2 = fresh_secret()
-    first = client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}").json()
-    second = client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}").json()
+    first = client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}").json()
+    second = client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}").json()
     assert first["status"] == "OK"
     assert second == first
     assert note_value(client, new_k1) == 2000
@@ -380,10 +380,10 @@ def test_retried_split_replays_the_original_result(client: TestClient, mint_note
 def test_retried_merge_replays_the_original_result(client: TestClient, mint_note):
     a, b = mint_note(2000), mint_note(3000)
     new_k1, h = fresh_secret()
-    first = client.get(f"/w/cb?k1={a}&k1={b}&h={h}").json()
-    second = client.get(f"/w/cb?k1={a}&k1={b}&h={h}").json()
+    first = client.get(f"/w/cb?k1={a}&k1={b}&p1={h}").json()
+    second = client.get(f"/w/cb?k1={a}&k1={b}&p1={h}").json()
     # order of the repeated k1s must not matter either - same burn, same set
-    third = client.get(f"/w/cb?k1={b}&k1={a}&h={h}").json()
+    third = client.get(f"/w/cb?k1={b}&k1={a}&p1={h}").json()
     assert first["status"] == "OK"
     assert second == first
     assert third == first
@@ -397,9 +397,9 @@ def test_retry_with_a_different_h_is_a_conflict_not_a_replay(client: TestClient,
     k1 = mint_note(5000)
     _, h = fresh_secret()
     _, other_h = fresh_secret()
-    first = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    first = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     assert first["status"] == "OK"
-    conflict = client.get(f"/w/cb?k1={k1}&h={other_h}").json()
+    conflict = client.get(f"/w/cb?k1={k1}&p1={other_h}").json()
     assert conflict == {"status": "ERROR", "reason": "Invalid or already spent k1."}
 
 
@@ -478,7 +478,7 @@ def test_pending_note_rejects_concurrent_operations(client: TestClient, node: Fa
 
     _, h = fresh_secret()
     thread = _melt_in_background(client, k1, pr, monkeypatch)
-    concurrent = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    concurrent = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     thread.join()
     result = thread.result  # type: ignore[attr-defined]
 
@@ -496,7 +496,7 @@ def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node:
 
     _, h = fresh_secret()
     thread = _melt_in_background(client, k1, pr, monkeypatch)
-    concurrent = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    concurrent = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     thread.join()
     result = thread.result  # type: ignore[attr-defined]
 
@@ -544,7 +544,7 @@ def test_pending_note_is_released_if_funding_source_becomes_unavailable(
     # the note must still be usable, not stuck pending forever
     assert note_value(client, k1) == 5000
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json()["status"] == "OK"
 
 
 def test_melt_rejects_own_pending_invoice(client: TestClient, node: FakeNode, mint_note):
@@ -616,7 +616,7 @@ def test_undeterminable_payment_status_leaves_the_note_pending(client: TestClien
     assert notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest()) == 5000
     assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
 
 
 def test_hodl_invoice_attack_leaves_the_note_pending_instead_of_restoring(
@@ -644,7 +644,7 @@ def test_hodl_invoice_attack_leaves_the_note_pending_instead_of_restoring(
     assert notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest()) == 5000
     assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
 
 
 def test_undeterminable_payment_status_retries_before_giving_up(
@@ -678,7 +678,7 @@ def test_any_invalid_k1_fails_the_whole_request(client: TestClient, mint_note):
     k1 = mint_note(5000)
     bogus = urandom(32).hex()
     _, h = fresh_secret()
-    result = client.get(f"/w/cb?k1={k1}&k1={bogus}&h={h}").json()
+    result = client.get(f"/w/cb?k1={k1}&k1={bogus}&p1={h}").json()
     assert result == {"status": "ERROR", "reason": "Invalid or already spent k1."}
     # the valid note was not burned
     assert note_value(client, k1) == 5000
@@ -687,7 +687,7 @@ def test_any_invalid_k1_fails_the_whole_request(client: TestClient, mint_note):
 def test_duplicate_k1_cannot_be_double_counted(client: TestClient, mint_note):
     k1 = mint_note(5000)
     _, h = fresh_secret()
-    result = client.get(f"/w/cb?k1={k1}&k1={k1}&h={h}").json()
+    result = client.get(f"/w/cb?k1={k1}&k1={k1}&p1={h}").json()
     assert result == {"status": "ERROR", "reason": "Invalid or already spent k1."}
     assert note_value(client, k1) == 5000
 
@@ -718,12 +718,12 @@ def test_withdraw_requires_k1(client: TestClient):
 
 
 def test_withdraw_by_hash_reports_the_same_note_without_the_secret(client: TestClient, mint_note):
-    # LUD-25 "Checking a note without exposing it": ?h= is a second way in
+    # LUD-25 "Checking a note without exposing it": ?p= is a second way in
     # for the same lookup, keyed by the note's id (sha256(k1)) directly
     k1 = mint_note(5000)
     note_id = sha256(bytes.fromhex(k1)).hexdigest()
     by_k1 = client.get(f"/w?k1={k1}").json()
-    by_h = client.get(f"/w?h={note_id}").json()
+    by_h = client.get(f"/w?p={note_id}").json()
     assert by_h["minWithdrawable"] == by_h["maxWithdrawable"] == 5000
     assert by_h["callback"] == by_k1["callback"]
     # unlike the k1 lookup, the response never echoes a secret it wasn't
@@ -735,12 +735,12 @@ def test_withdraw_by_hash_reports_the_same_note_without_the_secret(client: TestC
 def test_withdraw_by_hash_never_burns_the_note(client: TestClient, mint_note):
     k1 = mint_note(5000)
     note_id = sha256(bytes.fromhex(k1)).hexdigest()
-    client.get(f"/w?h={note_id}")
+    client.get(f"/w?p={note_id}")
     assert note_value(client, k1) == 5000
 
 
 def test_withdraw_by_hash_rejects_an_unknown_hash(client: TestClient):
-    result = client.get(f"/w?h={urandom(32).hex()}").json()
+    result = client.get(f"/w?p={urandom(32).hex()}").json()
     assert result == {"status": "ERROR", "reason": "Unknown note."}
 
 
@@ -748,20 +748,20 @@ def test_withdraw_by_hash_reports_a_retained_spent_note(client: TestClient, mint
     k1 = mint_note(5000)
     note_id = sha256(bytes.fromhex(k1)).hexdigest()
     new_k1, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"  # rotate, burns k1
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json()["status"] == "OK"  # rotate, burns k1
     # Both lookup forms report the retained spent record, while a never
     # registered hash remains unknown. These reads do not reissue the note.
-    for lookup in (f"h={note_id}", f"k1={k1}"):
+    for lookup in (f"p={note_id}", f"k1={k1}"):
         assert client.get(f"/w?{lookup}").json() == {"status": "ERROR", "reason": "Note already spent."}
     assert notes.note_spent(note_id)
-    assert client.get(f"/w?h={urandom(32).hex()}").json() == {"status": "ERROR", "reason": "Unknown note."}
+    assert client.get(f"/w?p={urandom(32).hex()}").json() == {"status": "ERROR", "reason": "Unknown note."}
 
 
-def test_withdraw_requires_exactly_one_of_k1_or_h(client: TestClient, mint_note):
+def test_withdraw_requires_exactly_one_of_k1_or_p(client: TestClient, mint_note):
     k1 = mint_note(5000)
     note_id = sha256(bytes.fromhex(k1)).hexdigest()
     assert client.get("/w").json()["status"] == "ERROR"
-    assert client.get(f"/w?k1={k1}&h={note_id}").json()["status"] == "ERROR"
+    assert client.get(f"/w?k1={k1}&p={note_id}").json()["status"] == "ERROR"
 
 
 def test_withdraw_by_hash_reports_pending_the_same_way_k1_would(
@@ -773,11 +773,11 @@ def test_withdraw_by_hash_reports_pending_the_same_way_k1_would(
     node.pay_delay = 0.3
 
     thread = _melt_in_background(client, k1, pr, monkeypatch)
-    pending = client.get(f"/w?h={note_id}").json()
+    pending = client.get(f"/w?p={note_id}").json()
     thread.join()
 
     assert pending == {"status": "ERROR", "reason": "pending"}
-    assert client.get(f"/w?h={note_id}").json() == {"status": "ERROR", "reason": "Note already spent."}
+    assert client.get(f"/w?p={note_id}").json() == {"status": "ERROR", "reason": "Note already spent."}
     assert notes.note_spent(note_id)
 
 
@@ -787,11 +787,11 @@ def test_failed_melt_restores_hash_lookup_value(client: TestClient, node: FakeNo
     node.pay_delay = 0.3
     node.fail_payments = True
     thread = _melt_in_background(client, k1, fake_invoice(5000), monkeypatch)
-    pending = client.get(f"/w?h={note_id}").json()
+    pending = client.get(f"/w?p={note_id}").json()
     thread.join()
 
     assert pending == {"status": "ERROR", "reason": "pending"}
-    restored = client.get(f"/w?h={note_id}").json()
+    restored = client.get(f"/w?p={note_id}").json()
     assert restored["maxWithdrawable"] == 5000
     assert "k1" not in restored
     assert not notes.note_spent(note_id)
@@ -807,7 +807,7 @@ def test_withdraw_reports_unknown_k1_distinctly_from_spent(client: TestClient, m
 
     k1 = mint_note(5000)
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json()["status"] == "OK"
     spent = client.get(f"/w?k1={k1}").json()
     assert spent == {"status": "ERROR", "reason": "Note already spent."}
 
@@ -824,7 +824,7 @@ def test_no_bearer_secret_is_ever_persisted(client: TestClient, mint_note):
     k1 = mint_note(5000)
     new_k1, h = fresh_secret()
     change_k1, h2 = fresh_secret()
-    client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}")
+    client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}")
     stored = str(notes.conn.execute("SELECT * FROM notes").fetchall())
     stored += str(notes.conn.execute("SELECT * FROM mints").fetchall())
     # per LUD-25 neither of these secrets ever crossed the wire to begin
@@ -840,10 +840,10 @@ def test_no_bearer_secret_is_ever_persisted(client: TestClient, mint_note):
 def test_spent_k1_cannot_be_replayed(client: TestClient, mint_note):
     k1 = mint_note(5000)
     new_k1, h = fresh_secret()
-    first = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    first = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     assert first["status"] == "OK"
     _, other_h = fresh_secret()
-    second = client.get(f"/w/cb?k1={k1}&h={other_h}").json()
+    second = client.get(f"/w/cb?k1={k1}&p1={other_h}").json()
     assert second["status"] == "ERROR"
     # the replacement from the first rotate is untouched by the replay
     assert note_value(client, new_k1) == 5000

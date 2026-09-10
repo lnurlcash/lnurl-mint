@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+from typing import Callable
 
 from .config import settings
 from .errors import log_internal_error
@@ -26,7 +27,7 @@ class NoteStore:
     instead the WALLET-chosen comment_hash it disclosed on the payRequest
     (see create_mint/settle_mint), and the payment preimage never becomes
     part of the note at all. For a rotated, split or merged note (LUD-25),
-    the id is a hash the WALLET itself generated and disclosed (`h`/`h2`)
+    the id is a hash the WALLET itself generated and disclosed (`p1`/`p2`)
     - this store (and this mint) never has the secret to begin with, on
     top of never persisting it.
     Burned notes are kept with spent=1 rather than deleted, so a
@@ -34,7 +35,14 @@ class NoteStore:
 
     Every operation that burns and/or mints runs in a single transaction:
     per the spec, if any k1 in a multi-k1 request is invalid the whole
-    request fails and no note may be burned or minted."""
+    request fails and no note may be burned or minted.
+
+    Also holds `usernames` (register_username/username_branch/
+    claim_next_index): LUD-25 Part 2's cx1 registration, letting a WALLET
+    claim a Lightning Address that auto-mints `cp1` notes off its own
+    branch. This is the one piece of durable per-caller state this mint
+    keeps beyond bearer notes themselves - a public key binding, never a
+    balance or an account."""
 
     def __init__(self, path: str) -> None:
         self.path = path
@@ -81,6 +89,12 @@ class NoteStore:
                 " h2 TEXT,"  # NULL unless this burn was a split
                 " amount1_msat INTEGER NOT NULL,"  # value minted under h
                 " amount2_msat INTEGER)"  # value minted under h2; NULL unless a split
+            )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS usernames ("
+                " username TEXT PRIMARY KEY,"
+                " cx1 TEXT NOT NULL,"  # hex(P || chain_code), LUD-25 Part 2's watch-only branch export
+                " next_index INTEGER NOT NULL DEFAULT 0)"  # see claim_next_index
             )
             # add-a-column migrations for databases created before that
             # column existed - this mint has no other migration mechanism,
@@ -272,7 +286,7 @@ class NoteStore:
         """Atomically burn every note in `burn_ids` and mint one fresh note
         per (id, amount) in zip(mint_note_ids, mint_amounts). Per LUD-25,
         `mint_note_ids` are hashes the WALLET itself generated and
-        disclosed (`h`/`h2` on the callback) - this side never generates,
+        disclosed (`p1`/`p2` on the callback) - this side never generates,
         sees, or persists the underlying secret, only registers a note
         under the hash it was given. Raises ValueError - burning and
         minting nothing - if any burn id is unknown, already spent, or
@@ -459,6 +473,55 @@ class NoteStore:
             if payment_hash is not None:
                 grouped.setdefault(payment_hash, []).append(note_id)
         return grouped
+
+    def register_username(self, username: str, cx1_hex: str) -> None:
+        """Claims `username` for the watch-only branch `cx1_hex` (LUD-25
+        Part 2's cx1 = hex(P || chain_code)) - first-come-first-served, no
+        proof the caller controls the branch's private key: `cx1` alone
+        never grants spending (see router.py's /register), so a squatted
+        registration only costs the real owner a name, never funds. Raises
+        ValueError if `username` is already claimed."""
+        with self._lock, self.conn:
+            try:
+                self.conn.execute("INSERT INTO usernames (username, cx1) VALUES (?, ?)", (username, cx1_hex))
+            except sqlite3.IntegrityError:
+                raise ValueError("Username already registered.")
+
+    def username_branch(self, username: str) -> str | None:
+        """The cx1 hex (P || chain_code) registered under `username`, or
+        None if it was never claimed (see register_username)."""
+        row = self.conn.execute("SELECT cx1 FROM usernames WHERE username = ?", (username,)).fetchone()
+        return row[0] if row else None
+
+    def claim_next_index(self, username: str, derive: Callable[[int], str]) -> tuple[str, int]:
+        """Picks and reserves the next usable note index on `username`'s
+        registered branch - LUD-25 Part 2's own race-avoidance paragraph
+        under Seed & derivation: `derive(i)` (router.py, wrapping
+        derivation.derive_pubkey) is tried starting at the persisted
+        next_index, skipping any index whose resulting pubkey already
+        names an outstanding *or* previously-minted note - the same
+        collision create_mint itself would reject - rather than crediting
+        into an index a pending rotate/split/merge might also be about to
+        install. Persists next_index past the winner and returns
+        (pk_hex, index) for the caller to mint under, exactly like a
+        WALLET-supplied comment_hash. Raises ValueError if `username` was
+        never registered."""
+        with self._lock, self.conn:
+            row = self.conn.execute("SELECT next_index FROM usernames WHERE username = ?", (username,)).fetchone()
+            if row is None:
+                raise ValueError("Unknown username.")
+            index = row[0]
+            while True:
+                pk_hex = derive(index)
+                collision = self.conn.execute(
+                    "SELECT 1 FROM notes WHERE id = ? UNION SELECT 1 FROM mints WHERE comment_hash = ?",
+                    (pk_hex, pk_hex),
+                ).fetchone()
+                if not collision:
+                    break
+                index += 1
+            self.conn.execute("UPDATE usernames SET next_index = ? WHERE username = ?", (index + 1, username))
+            return pk_hex, index
 
 
 notes = NoteStore(settings.database_path)

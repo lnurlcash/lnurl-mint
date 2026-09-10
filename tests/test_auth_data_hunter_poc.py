@@ -43,7 +43,7 @@ def test_f1_verify_disclosure_requires_verify_enabled(client: TestClient, node: 
 
     # the note is the victim's to rotate, at whatever speed they like
     _, victim_h = fresh_secret()
-    rotate = client.get(f"/w/cb?k1={victim_secret}&h={victim_h}")
+    rotate = client.get(f"/w/cb?k1={victim_secret}&p1={victim_h}")
     assert rotate.json()["status"] == "OK", rotate.text
     assert notes.note_amount(victim_h) == 50_000
 
@@ -75,7 +75,7 @@ def test_f3_withdraw_rejects_pending_note_with_spec_reason(client: TestClient, n
         assert info == {"status": "ERROR", "reason": "pending"}, info
 
         _, h = fresh_secret()
-        rotate = client.get(f"/w/cb?k1={k1}&h={h}").json()
+        rotate = client.get(f"/w/cb?k1={k1}&p1={h}").json()
         assert rotate["reason"] == "pending"
     finally:
         node.pay_delay = 0.0
@@ -93,7 +93,7 @@ def test_f4_rotate_onto_pending_mint_rejected_victim_unharmed(client: TestClient
     victim_ph = sha256(victim_preimage).hexdigest()
 
     # the squat attempt fails atomically - nothing planted, nothing burned
-    r1 = client.get(f"/w/cb?k1={attacker_k1}&h={victim_ph}")
+    r1 = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_ph}")
     assert r1.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}, r1.text
     assert notes.note_amount(victim_ph) is None  # no squatter row
     attacker_id = sha256(bytes.fromhex(attacker_k1)).hexdigest()

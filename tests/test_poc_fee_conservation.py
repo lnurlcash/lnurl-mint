@@ -68,7 +68,7 @@ class Ledger:
         old = notes.note_amount(_note_id(k1))
         assert old is not None
         secret, h = fresh_secret()
-        r = self.client.get(f"/w/cb?k1={k1}&h={h}")
+        r = self.client.get(f"/w/cb?k1={k1}&p1={h}")
         assert r.json()["status"] == "OK", r.text
         self.ids.remove(_note_id(k1))
         self.ids.append(h)
@@ -81,7 +81,7 @@ class Ledger:
         assert total is not None
         secret_amount, h = fresh_secret()
         secret_change, h2 = fresh_secret()
-        r = self.client.get(f"/w/cb?k1={k1}&h={h}&h2={h2}&amount={amount_msat}")
+        r = self.client.get(f"/w/cb?k1={k1}&p1={h}&p2={h2}&amount={amount_msat}")
         assert r.json()["status"] == "OK", r.text
         change = total - amount_msat - settings.base_fee_msat
         self.fees += settings.base_fee_msat
@@ -100,7 +100,7 @@ class Ledger:
             values.append(v)
         secret, h = fresh_secret()
         query = "&".join(f"k1={k1}" for k1 in k1s)
-        r = self.client.get(f"/w/cb?{query}&h={h}")
+        r = self.client.get(f"/w/cb?{query}&p1={h}")
         assert r.json()["status"] == "OK", r.text
         refund = (len(k1s) - 1) * settings.base_fee_msat
         self.refunds += refund
@@ -219,7 +219,7 @@ def test_dust_split_edges(ledger: Ledger, fee_settings):
     total = notes.note_amount(_note_id(k1))
     secret, h = fresh_secret()
     secret2, h2 = fresh_secret()
-    r = ledger.client.get(f"/w/cb?k1={k1}&h={h}&h2={h2}&amount={total - 1000}")
+    r = ledger.client.get(f"/w/cb?k1={k1}&p1={h}&p2={h2}&amount={total - 1000}")
     assert r.json()["status"] == "ERROR"
     assert notes.note_amount(_note_id(k1)) == total
     assert notes.note_amount(h) is None and notes.note_amount(h2) is None
@@ -323,7 +323,7 @@ def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     # second burn finds it spent and rolls the whole transaction back
     k1 = ledger.mint(100_000)
     _, h = fresh_secret()
-    r = ledger.client.get(f"/w/cb?k1={k1}&k1={k1}&h={h}")
+    r = ledger.client.get(f"/w/cb?k1={k1}&k1={k1}&p1={h}")
     assert r.json()["status"] == "ERROR"
     assert notes.note_amount(_note_id(k1)) == 99_000  # intact
     assert notes.note_amount(h) is None  # nothing minted
@@ -334,7 +334,7 @@ def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     k1b = ledger.mint(100_000)
     _, h_dup = fresh_secret()
     _, h2_dup = fresh_secret()
-    r = ledger.client.get(f"/w/cb?k1={k1b}&h={h_dup}&h2={h_dup}&amount=1000")
+    r = ledger.client.get(f"/w/cb?k1={k1b}&p1={h_dup}&p2={h_dup}&amount=1000")
     assert r.json()["status"] == "ERROR"
     assert notes.note_amount(_note_id(k1b)) == 99_000
     assert notes.note_amount(h_dup) is None
@@ -343,14 +343,14 @@ def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     # merge onto an EXISTING outstanding note id: INSERT collides, rolls back
     k1c = ledger.mint(100_000)
     existing_id = _note_id(k1)
-    r = ledger.client.get(f"/w/cb?k1={k1c}&h={existing_id}")
+    r = ledger.client.get(f"/w/cb?k1={k1c}&p1={existing_id}")
     assert r.json()["status"] == "ERROR"
     assert notes.note_amount(_note_id(k1c)) == 99_000
     assert notes.note_amount(existing_id) == 99_000
     ledger.assert_conserved()
 
     # split amount == total (change would be negative) rejected, no-op
-    r = ledger.client.get(f"/w/cb?k1={k1}&h={h}&h2={h2_dup}&amount=99_000")
+    r = ledger.client.get(f"/w/cb?k1={k1}&p1={h}&p2={h2_dup}&amount=99_000")
     assert r.json()["status"] == "ERROR"
     assert notes.note_amount(_note_id(k1)) == 99_000
     ledger.assert_conserved()

@@ -75,7 +75,7 @@ class LnurlWithdrawResponse(BaseModel):
     (this GET is informational and never burns anything).
 
     `k1` is optional (unlike plain LUD-03) to support LUD-25's "Checking a
-    note without exposing it": when the note was looked up by `h` rather
+    note without exposing it": when the note was looked up by `p` rather
     than `k1` (router.get_withdraw), there is no raw secret to echo back -
     the field is omitted from the response entirely (see
     LnurlErrorResponseHandler's response_model_exclude_none) rather than
@@ -83,7 +83,11 @@ class LnurlWithdrawResponse(BaseModel):
 
     `mintPubkey` (LUD-25 Offline verification, optional) is this mint's
     signing key - omitted entirely if no funding source is configured
-    (see signing.mint_pubkey)."""
+    (see signing.mint_pubkey).
+
+    `sig` (Part 2 Offline verification, optional) is a ready-made `cs1`
+    certificate for a `cp1` note looked up by its own `ck1` - see
+    router.get_withdraw. Omitted for a legacy Part 1 note or a `p`-lookup."""
 
     tag: Literal["withdrawRequest"] = "withdrawRequest"
     callback: str
@@ -92,6 +96,7 @@ class LnurlWithdrawResponse(BaseModel):
     maxWithdrawable: int
     defaultDescription: str = ""
     mintPubkey: str | None = None
+    sig: str | None = None
 
 
 class LnurlMintAddressResponse(BaseModel):
@@ -155,7 +160,7 @@ class WithdrawSuccessResponse(BaseModel):
     semantics). `pr`/`verify` echo a melt's invoice and its LUD-21-style
     settlement-proof URL, present only when VERIFY_ENABLED. `sig`/`sig2`
     are this mint's Offline-verification signatures over a rotate/split/
-    merge's `h`/`h2` (see signing.sign_note) - `sig2` only for a split,
+    merge's `p1`/`p2` (see signing.sign_note) - `sig2` only for a split,
     both omitted if no funding source is configured. None fields are
     excluded on the wire."""
 
@@ -164,3 +169,13 @@ class WithdrawSuccessResponse(BaseModel):
     sig2: str | None = None
     pr: str | None = None
     verify: str | None = None
+
+
+class RegisterUsernameResponse(BaseModel):
+    """LUD-25 Part 2's cx1 registration (router's /register) - claims
+    `username` for a WALLET's watch-only branch, first-come-first-served,
+    no proof of possession (see NoteStore.register_username). A bare
+    success marker; the error case is the ordinary
+    {"status": "ERROR", "reason": ...} every other endpoint here uses."""
+
+    status: Literal["OK"] = "OK"

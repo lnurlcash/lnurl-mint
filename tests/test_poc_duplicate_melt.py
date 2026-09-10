@@ -45,7 +45,7 @@ def test_second_melt_into_the_same_invoice_is_rejected(client: TestClient, node:
 
     # note B is untouched - still fully spendable
     _, h = fresh_secret()
-    res = client.get(f"/w/cb?k1={k1_b}&h={h}")
+    res = client.get(f"/w/cb?k1={k1_b}&p1={h}")
     assert res.json()["status"] == "OK", res.text
 
 

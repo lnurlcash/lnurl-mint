@@ -164,7 +164,7 @@ def test_withdraw_info_census(client: TestClient, node: FakeNode, mint_note, cen
     # case 5: spent note - answered from the local spent flag, no RPC
     spent_k1 = mint_note(10_000)
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={spent_k1}&h={h}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={spent_k1}&p1={h}").json()["status"] == "OK"
     census.deltas()  # discard the rotate's own sign_message
     r = client.get(f"/w?k1={spent_k1}")
     assert r.json() == {"status": "ERROR", "reason": "Note already spent."}
@@ -261,20 +261,20 @@ def test_withdraw_callback_signing_rpcs(client: TestClient, node: FakeNode, mint
     # rotate: 1 sign_message per request, never cached
     k1 = minted_materialized_note(10_000)
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json()["status"] == "OK"
     assert census.deltas() == {"sign_message": 1}
 
     # split: 2 sign_message per request (one per new note)
     k1 = minted_materialized_note(10_000)
     _, h = fresh_secret()
     _, h2 = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}&h2={h2}&amount=4000").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1}&p1={h}&p2={h2}&amount=4000").json()["status"] == "OK"
     assert census.deltas() == {"sign_message": 2}
 
     # merge: 1 sign_message per request (regardless of input count)
     k1a, k1b = minted_materialized_note(10_000), minted_materialized_note(10_000)
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1a}&k1={k1b}&h={h}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1a}&k1={k1b}&p1={h}").json()["status"] == "OK"
     assert census.deltas() == {"sign_message": 1}
 
     # melt: 1 pay_invoice (background task, runs within the TestClient

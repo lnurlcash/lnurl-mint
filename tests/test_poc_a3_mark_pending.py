@@ -61,7 +61,7 @@ def test_a3_http_melt_rejects_multiple_k1s_before_any_reservation(client: TestCl
     assert _is_pending(_note_id(k1a)) is False
     assert _is_pending(_note_id(k1b)) is False
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1a}&h={h}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1a}&p1={h}").json()["status"] == "OK"
 
 
 def test_a3_mark_pending_validates_every_id_at_any_position(client: TestClient, node, mint_note):
@@ -86,7 +86,7 @@ def test_a3_mark_pending_validates_every_id_at_any_position(client: TestClient, 
     spent_k1 = mint_note(10_000)
     spent_id = _materialize(client, spent_k1)
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={spent_k1}&h={h}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={spent_k1}&p1={h}").json()["status"] == "OK"
     with pytest.raises(ValueError, match="Invalid or already spent k1"):
         notes.mark_pending([real_id, spent_id], ph)
     assert _is_pending(real_id) is False
@@ -102,7 +102,7 @@ def test_a3_mark_pending_validates_every_id_at_any_position(client: TestClient, 
 
     # sanity: the real note still rotates fine - nothing above reserved it
     _, h2 = fresh_secret()
-    assert client.get(f"/w/cb?k1={real_k1}&h={h2}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={real_k1}&p1={h2}").json()["status"] == "OK"
 
 
 def test_a3_finalize_and_restore_on_never_reserved_ids_are_noops_for_unknown_ids():

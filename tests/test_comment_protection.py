@@ -46,7 +46,7 @@ def test_valid_comment_credits_the_note_under_the_secret_not_the_preimage(client
     # ...never under the raw preimage, which played no further role
     assert client.get(f"/w?k1={preimage}").json() == {"status": "ERROR", "reason": "Unknown note."}
     _, h = fresh_secret()
-    r = client.get(f"/w/cb?k1={preimage}&h={h}").json()
+    r = client.get(f"/w/cb?k1={preimage}&p1={h}").json()
     assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}
 
 
@@ -56,7 +56,7 @@ def test_valid_comment_note_redeems_normally_by_secret(client: TestClient, node:
     node.settled.add(sha256(node.last_preimage).hexdigest())
 
     _, h = fresh_secret()
-    r = client.get(f"/w/cb?k1={secret}&h={h}").json()
+    r = client.get(f"/w/cb?k1={secret}&p1={h}").json()
     assert r["status"] == "OK", r
     assert notes.note_amount(h) == VALUE
 
@@ -144,7 +144,7 @@ def test_comment_protected_note_can_split_rotate_and_merge_like_any_other(client
 
     _, h = fresh_secret()
     _, h2 = fresh_secret()
-    r = client.get(f"/w/cb?k1={secret}&h={h}&h2={h2}&amount=5000").json()
+    r = client.get(f"/w/cb?k1={secret}&p1={h}&p2={h2}&amount=5000").json()
     assert r["status"] == "OK", r
     assert notes.note_amount(h) == 5000
     assert notes.note_amount(h2) == VALUE - 5000

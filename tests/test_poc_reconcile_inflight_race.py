@@ -153,7 +153,7 @@ def test_reconcile_skips_a_note_whose_melt_is_in_flight(inflight: InFlightNode):
             assert notes.note_pending(note_id) is True
 
             # the holder's rotate still fails - the value was never freed
-            res = await ac.get(f"/w/cb?k1={k1}&h={attacker_h}")
+            res = await ac.get(f"/w/cb?k1={k1}&p1={attacker_h}")
             assert res.json() == {"status": "ERROR", "reason": "pending"}
 
             # only now does the melt's payment actually go out

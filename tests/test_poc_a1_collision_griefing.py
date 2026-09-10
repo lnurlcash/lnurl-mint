@@ -70,7 +70,7 @@ def test_rotate_squat_is_rejected_and_victim_mint_survives(client: TestClient, n
     victim_ph, victim_k1 = _pending_victim_mint(client, node)
     assert notes.pending_mint(victim_ph) == VICTIM_AMOUNT
 
-    resp = client.get(f"/w/cb?k1={attacker_k1}&h={victim_ph}")
+    resp = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_ph}")
     _assert_squat_rejected(resp, attacker_k1)
     # no squatter note exists under the victim's future id
     assert notes.note_amount(victim_ph) is None
@@ -86,14 +86,14 @@ def test_split_and_merge_squats_are_rejected_identically(client: TestClient, nod
     if variant == "split_h":
         k1 = mint_note(PLANT_AMOUNT)
         _, h2 = fresh_secret()
-        resp = client.get(f"/w/cb?k1={k1}&amount=4000&h={victim_ph}&h2={h2}")
+        resp = client.get(f"/w/cb?k1={k1}&amount=4000&p1={victim_ph}&p2={h2}")
     elif variant == "split_h2":
         k1 = mint_note(PLANT_AMOUNT)
         _, h = fresh_secret()
-        resp = client.get(f"/w/cb?k1={k1}&amount=4000&h={h}&h2={victim_ph}")
+        resp = client.get(f"/w/cb?k1={k1}&amount=4000&p1={h}&p2={victim_ph}")
     else:  # merge
         k1a, k1b = mint_note(6000), mint_note(4000)
-        resp = client.get(f"/w/cb?k1={k1a}&k1={k1b}&h={victim_ph}")
+        resp = client.get(f"/w/cb?k1={k1a}&k1={k1b}&p1={victim_ph}")
         k1 = k1a  # for the atomicity check below (both must survive)
     assert resp.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}, resp.text
     assert notes.note_amount(victim_ph) is None  # no squatter planted
@@ -123,7 +123,7 @@ def test_squat_on_an_already_settled_mints_id_is_also_rejected(client: TestClien
     assert notes.mint_settled(victim_ph) is True
 
     attacker_k1 = mint_note(PLANT_AMOUNT)
-    resp = client.get(f"/w/cb?k1={attacker_k1}&h={victim_ph}")
+    resp = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_ph}")
     _assert_squat_rejected(resp, attacker_k1)
     # the victim's real note is untouched
     assert notes.note_amount(victim_note_id) == VICTIM_AMOUNT
@@ -134,16 +134,16 @@ def test_legitimate_ids_still_pass_the_guard(client: TestClient, node, mint_note
     rotate, split and merge exactly as before the guard existed."""
     k1 = mint_note(PLANT_AMOUNT)
     _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1}&p1={h}").json()["status"] == "OK"
     assert notes.note_amount(h) == PLANT_AMOUNT
 
     k1b, k1c = mint_note(6000), mint_note(4000)
     _, hm = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1b}&k1={k1c}&h={hm}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1b}&k1={k1c}&p1={hm}").json()["status"] == "OK"
     assert notes.note_amount(hm) == 10_000
 
     k1d = mint_note(PLANT_AMOUNT)
     _, hs, _, hs2 = *fresh_secret(), *fresh_secret()
-    assert client.get(f"/w/cb?k1={k1d}&amount=4000&h={hs}&h2={hs2}").json()["status"] == "OK"
+    assert client.get(f"/w/cb?k1={k1d}&amount=4000&p1={hs}&p2={hs2}").json()["status"] == "OK"
     assert notes.note_amount(hs) == 4000
     assert notes.note_amount(hs2) == PLANT_AMOUNT - 4000
