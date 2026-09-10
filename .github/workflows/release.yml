@@ -1,7 +1,7 @@
 name: Release
 
 # on every version tag push (e.g. `git tag v1.2.0 && git push origin v1.2.0`):
-# builds and pushes dni256/lnurl-mint to Docker Hub, and creates a GitHub
+# builds and pushes lnurlcash/lnurl-mint to Docker Hub, and creates a GitHub
 # Release with notes auto-generated from the commits/PRs since the previous
 # tag. The docker job requires the repo secrets DOCKERHUB_USERNAME and
 # DOCKERHUB_TOKEN (a Docker Hub access token, not the account password -
@@ -29,13 +29,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # from tag v1.2.0, produces the tags dni256/lnurl-mint:1.2.0, :1.2,
+      # from tag v1.2.0, produces the tags lnurlcash/lnurl-mint:1.2.0, :1.2,
       # :1, and :latest (docker/metadata-action's default semver pattern)
       - name: Derive image tags
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
-          images: dni256/lnurl-mint
+          images: lnurlcash/lnurl-mint
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
