@@ -80,6 +80,24 @@ def test_recovery_scan_finds_a_note_via_p_equals_cp1(client: TestClient, node: F
     assert data.get("maxWithdrawable") == 5000, data
 
 
+def test_recovery_scan_via_p_equals_cp1_also_includes_cs1_certificate(client: TestClient, node: FakeNode):
+    """A `cs1` certificate is just this mint's signature over (pubkey,
+    amount) - not a spend authorization - so a `?p=cp1<pk>` lookup (which
+    names a cp1 note just as unambiguously as a `ck1`, but proves no
+    ownership) is exactly as safe a place to hand one out. Without this, a
+    WALLET's recovery scan (which only ever has `p`, never `k1`, until it
+    finds the note) would need a second round trip - or to force a rotate -
+    just to obtain a certificate it could already prove it's entitled to."""
+    sk, cp1 = _mint_cp1_note(client, node, 5000)
+    data = client.get(f"/w?p={cp1}").json()
+    assert "sig" in data
+    sig = bech32m.decode_cs1(data["sig"])
+    assert sig is not None
+    digest = lightning_signed_message_digest(f"LNURLcash:5000:{bech32m.decode_cp1(cp1).hex()}")
+    recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
+    assert recovered.format(compressed=True).hex() == node.pubkey
+
+
 def test_recovery_scan_reports_a_spent_cp1_note_as_spent_not_unknown(client: TestClient, node: FakeNode):
     sk, cp1 = _mint_cp1_note(client, node, 5000)
     k1 = _ck1(sk)

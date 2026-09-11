@@ -168,8 +168,9 @@ uses:
   (same offline-verification signing key as above, over the note's public
   key and amount instead of a hash) - returned as `sig`/`sig2` alongside
   every mint/rotate/split/merge of a `cp1` note, and on the informational
-  `GET /w?k1=<ck1>` too, so a holder can verify a note it was just handed
-  without contacting this mint at all.
+  `GET /w?k1=<ck1>` or `GET /w?p=<cp1<pk>>` too, so a holder (or a third
+  party checking a note by its public key alone, without ever seeing its
+  spend secret) can verify it without contacting this mint at all.
 - **`cx1<P || chain_code>`** - a WALLET's watch-only export of its whole
   derivation branch for this mint (non-hardened, so every note's public
   key is computable from `cx1` alone, never its private key) - see

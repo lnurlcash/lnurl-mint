@@ -1005,13 +1005,16 @@ async def get_withdraw(
     invoice) do.
 
     `sig` (Part 2 Offline verification) is additionally included whenever
-    `k1` was a `ck1` signature - a ready-made `cs1` certificate for the
-    `cp1` note it identifies, so a WALLET need not force a rotate just to
-    obtain one. Omitted for a `p`-lookup or a legacy Part 1 `k1`: this
-    store has no record of *how* a note was originally minted, only that
-    an id is outstanding, so only a `ck1`-shaped query - which proves the
-    caller holds that note's own key - lets this endpoint know a
-    certificate applies."""
+    the query identifies a `cp1` note - either `k1` was a `ck1` signature,
+    or `p` was the note's own `cp1<pk>` - a ready-made `cs1` certificate for
+    it, so a WALLET need not force a rotate just to obtain one, and a
+    recovery scan (`_resolve_note_by_hash`'s own docstring) gets one for
+    free while probing `?p=cp1<pk_i>`. A certificate isn't a spend
+    authorization - just this mint's signature over (pubkey, amount) - so
+    unlike redemption itself, handing one out never requires proof the
+    caller holds the note's private key. Omitted for a legacy Part 1 `k1`
+    or `p`: those identify a note by a plain hash, which was never signed
+    with a `cp1` certificate to begin with."""
     p = p if p is not None else h
     if (k1 is None) == (p is None):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Specify exactly one of k1 or p.")
@@ -1032,6 +1035,11 @@ async def get_withdraw(
         # its spent state, while keeping the spending secret off the wire.
         p_decoded = _decode_note_ref(p)
         already_spent = bool(p_decoded and notes.note_spent(p_decoded[0]))
+        # p itself names a cp1 pubkey (or doesn't) independently of any
+        # ownership proof - a cs1 certificate is just this mint's signature
+        # over (pubkey, amount), not a spend authorization, so it's exactly
+        # as safe to hand out here as it is for a ck1 lookup.
+        is_cp1 = bool(p_decoded and p_decoded[1])
 
     if resolved is None:
         if already_spent:
