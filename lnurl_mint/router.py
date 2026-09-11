@@ -478,16 +478,24 @@ async def _resolve_note(k1: str) -> tuple[str, int] | None:
 
 
 async def _resolve_note_by_hash(h: str) -> tuple[str, int] | None:
-    """(id, value) of the outstanding note whose id (sha256(k1) hex) is
-    literally `h` - LUD-25's "Checking a note without exposing it"
-    (router.get_withdraw's `p` query param). Unlike _resolve_note, no
-    hashing happens here: `h` already *is* the note id this store keys
+    """(id, value) of the outstanding note whose id is literally `h` -
+    LUD-25's "Checking a note without exposing it" (router.get_withdraw's
+    `p` query param) - accepting either a raw legacy hash or a `cp1<pk>`
+    public key (Part 2's Wallet-side ownership proofs; see
+    _decode_note_ref), both are just "the note id" as far as this lookup
+    is concerned. This is what a WALLET's recovery scan uses too (25.md's
+    Seed & derivation: re-derive `pk_0, pk_1, ...` and GET `?p=cp1<pk_i>`
+    for each), so rejecting the `cp1<...>` shape here would make that scan
+    never find a note it should. Unlike _resolve_note, no hashing happens
+    here: `h` already *is* (or decodes to) the note id this store keys
     every note by internally, so this is just _note_amount_by_id with the
-    same not-found/HEX32 handling _resolve_note gives a raw k1."""
-    if not HEX32_PATTERN.match(h):
+    same not-found handling _resolve_note gives a raw k1."""
+    decoded = _decode_note_ref(h)
+    if decoded is None:
         return None
-    amount_msat = await _note_amount_by_id(h)
-    return (h, amount_msat) if amount_msat is not None else None
+    note_id, _ = decoded
+    amount_msat = await _note_amount_by_id(note_id)
+    return (note_id, amount_msat) if amount_msat is not None else None
 
 
 def _mint_fee_msat(amount_msat: int) -> int:
@@ -995,9 +1003,10 @@ async def get_withdraw(
     else:
         assert p is not None
         resolved = await _resolve_note_by_hash(p)
-        # The hash already identifies the note: disclose its spent state,
-        # while keeping the spending secret off the wire.
-        already_spent = bool(HEX32_PATTERN.match(p) and notes.note_spent(p))
+        # The hash (or cp1 pubkey) already identifies the note: disclose
+        # its spent state, while keeping the spending secret off the wire.
+        p_decoded = _decode_note_ref(p)
+        already_spent = bool(p_decoded and notes.note_spent(p_decoded[0]))
 
     if resolved is None:
         if already_spent:

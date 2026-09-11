@@ -69,6 +69,27 @@ def test_legacy_note_informational_get_has_no_sig(client: TestClient, mint_note)
     assert "sig" not in data
 
 
+def test_recovery_scan_finds_a_note_via_p_equals_cp1(client: TestClient, node: FakeNode):
+    """25.md's Seed & derivation: a WALLET recovering on a fresh install
+    re-derives pk_0, pk_1, ... and GETs the withdraw LNURL with
+    `?p=cp1<pk_i>` for each - this must find an outstanding cp1 note the
+    same way `?p=<raw hex>` already does for a legacy one, not 404 just
+    because the id happens to be bech32m-encoded on the wire."""
+    sk, cp1 = _mint_cp1_note(client, node, 5000)
+    data = client.get(f"/w?p={cp1}").json()
+    assert data.get("maxWithdrawable") == 5000, data
+
+
+def test_recovery_scan_reports_a_spent_cp1_note_as_spent_not_unknown(client: TestClient, node: FakeNode):
+    sk, cp1 = _mint_cp1_note(client, node, 5000)
+    k1 = _ck1(sk)
+    new_sk, new_cp1 = _note_keypair()
+    assert client.get(f"/w/cb?k1={k1}&p1={new_cp1}").json()["status"] == "OK"
+
+    data = client.get(f"/w?p={cp1}").json()
+    assert data == {"status": "ERROR", "reason": "Note already spent."}
+
+
 def test_rotate_cp1_note_produces_cp1_output_with_certificate(client: TestClient, node: FakeNode):
     sk, cp1 = _mint_cp1_note(client, node, 5000)
     k1 = _ck1(sk)
