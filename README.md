@@ -190,6 +190,10 @@ themselves with a specific key already in hand), which is honored as-is.
 Set `USERNAME_REGISTRATION_ENABLED=false` to turn this off entirely (404,
 same off-switch convention as `VERIFY_ENABLED`) - this mint's own fixed
 identity (`USERNAME`/the bare-domain `_`) is never affected either way.
+A registered username is always stored lowercase and matched
+case-insensitively (same as `USERNAME` itself, see above) - `Alice`,
+`alice` and `ALICE` all resolve to the same identity regardless of which
+one a payer's client happened to send.
 
 **Verify** (optional, [LUD-21](../luds/21.md)): set `VERIFY_ENABLED=true` to
 serve `/verify/{payment_hash}` and advertise a `verify` URL in `/p/cb`'s

@@ -568,16 +568,26 @@ def _known_username(username: str) -> bool:
     queries instead of settings.username, per spec. Accepted alongside
     settings.username (never in place of it) on both well-known aliases
     below - this mint answers identically for either name, since both
-    name the same identity."""
-    return username == settings.username or username == "_"
+    name the same identity.
+
+    Case-insensitive: a Lightning Address local-part is conventionally
+    matched that way regardless of how a payer's client happened to
+    capitalize it (this mint's own USERNAME config included - an operator
+    setting USERNAME=Alice still matches alice/ALICE/Alice alike), the
+    same normalization _registered_username_branch applies for a
+    registered one."""
+    normalized = username.lower()
+    return normalized == settings.username.lower() or normalized == "_"
 
 
-# a registrable username (router.register_username): lowercase to keep
-# lookups case-insensitive-by-convention without an actual case-folding
-# rule, short enough to stay a reasonable Lightning Address local-part.
-# Deliberately excludes anything HEX32_PATTERN/bech32m would also match -
-# no registered username can ever be confused for a k1/comment/p1 value on
-# another endpoint.
+# a registrable username (router.register_username): lowercase-only, so a
+# stored username is always already normalized (see register_username,
+# which lowercases before ever calling this or NoteStore.register_username)
+# and every lookup site can just lowercase its own input to match - short
+# enough to stay a reasonable Lightning Address local-part. Deliberately
+# excludes anything HEX32_PATTERN/bech32m would also match - no registered
+# username can ever be confused for a k1/comment/p1 value on another
+# endpoint.
 _USERNAME_PATTERN = re.compile(r"^[a-z0-9_.-]{1,32}$")
 
 
@@ -586,14 +596,17 @@ def _registered_username_branch(username: str) -> str | None:
     or None if there is none - or unconditionally None while
     username_registration_enabled is off, the same full-endpoint-off
     convention verify_enabled uses: turning it off reverts this mint to a
-    single fixed identity everywhere, not just at /register itself."""
+    single fixed identity everywhere, not just at /register itself.
+    Case-insensitive (see _known_username) - `username` is lowercased here
+    before the lookup, matching how it was stored at registration time."""
     if not settings.username_registration_enabled:
         return None
-    return notes.username_branch(username)
+    return notes.username_branch(username.lower())
 
 
 def _registrable_username(username: str) -> bool:
-    """Whether `username` is syntactically valid AND not one of this mint's
+    """Whether `username` (already lowercased by the caller - see
+    register_username) is syntactically valid AND not one of this mint's
     own reserved identities (settings.username, the bare-domain `_` - see
     _known_username) - a registered username never shadows this mint's own
     fixed identity."""
@@ -611,9 +624,15 @@ def register_username(username: str, cx1: str) -> RegisterUsernameResponse:
     proof the caller actually controls the branch's private key: `cx1`
     alone never grants spending (only a note's own `sk_i` does - see
     25.md's Encoding and Wallet-side ownership proofs), so a squatted
-    registration only costs the real owner a name, never funds."""
+    registration only costs the real owner a name, never funds.
+
+    `username` is lowercased before validation and storage - a registered
+    username is always case-insensitive (see _known_username), so this is
+    the one place that normalization actually has to happen; every lookup
+    site just lowercases its own input to match."""
     if not settings.username_registration_enabled:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
+    username = username.lower()
     if not _registrable_username(username):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid or reserved username.")
     branch = bech32m.decode_cx1(cx1)
@@ -797,6 +816,12 @@ async def get_pay_callback(
 
     branch: bytes | None = None
     if username is not None and not _known_username(username):
+        # normalized once, here, and reused below for claim_next_index -
+        # that lookup has to use the exact same lowercased key
+        # _registered_username_branch just matched, or it would raise
+        # "Unknown username." against the very branch this call just found
+        # (see NoteStore.register_username, which always stores lowercase)
+        username = username.lower()
         branch_hex = _registered_username_branch(username)
         if branch_hex is None:
             raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")

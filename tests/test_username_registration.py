@@ -158,3 +158,66 @@ def test_username_registration_disabled_hides_registered_address(client: TestCli
     monkeypatch.setattr(settings, "username_registration_enabled", False)
     resp = client.get("/.well-known/lnurlp/jill")
     assert resp.json() == {"status": "ERROR", "reason": "Unknown user."}
+
+
+def test_registration_lowercases_a_mixed_case_username(client: TestClient):
+    """A registered username is always stored normalized - 'Kevin'
+    registers as 'kevin', so every lookup site (which also lowercases its
+    own input) resolves it the same way regardless of how a client
+    capitalized either side."""
+    _, _, cx1 = _branch()
+    resp = client.get(f"/register?username=Kevin&cx1={cx1}")
+    assert resp.json() == {"status": "OK"}
+    assert notes.username_branch("kevin") == bech32m.decode_cx1(cx1).hex()
+    assert notes.username_branch("Kevin") is None  # stored lowercase, not as typed
+
+
+def test_lnaddress_lookup_is_case_insensitive(client: TestClient):
+    """A payer's client capitalizing the local-part differently than how
+    it was registered (e.g. Alice@host vs alice@host) must still resolve -
+    LUD-16 local-parts are conventionally case-insensitive."""
+    _, _, cx1 = _branch()
+    client.get(f"/register?username=liam&cx1={cx1}")
+    lower = client.get("/.well-known/lnurlp/liam").json()
+    mixed = client.get("/.well-known/lnurlp/Liam").json()
+    upper = client.get("/.well-known/lnurlp/LIAM").json()
+    assert lower["tag"] == mixed["tag"] == upper["tag"] == "payRequest"
+
+
+def test_registered_lnaddress_case_insensitive_duplicate_rejected(client: TestClient):
+    """Registering 'Noah' after 'noah' is already taken must collide, not
+    silently create a second, differently-cased identity for the same
+    logical username."""
+    _, _, cx1 = _branch()
+    assert client.get(f"/register?username=noah&cx1={cx1}").json()["status"] == "OK"
+    _, _, cx1_2 = _branch()
+    resp = client.get(f"/register?username=Noah&cx1={cx1_2}")
+    assert resp.json()["status"] == "ERROR"
+
+
+def test_mint_username_config_is_case_insensitive(client: TestClient):
+    """This mint's own fixed identity (settings.username) resolves the
+    same way regardless of how a payer's client capitalized it."""
+    assert client.get(f"/.well-known/lnurlp/{settings.username.upper()}").json()["tag"] == "payRequest"
+    assert client.get(f"/.well-known/lnurlp/{settings.username.capitalize()}").json()["tag"] == "payRequest"
+
+
+def test_automint_works_with_mixed_case_username_in_callback(client: TestClient, node: FakeNode):
+    """The exact bug this test guards: the callback URL carries whatever
+    case the lnaddress lookup was queried with, and the auto-mint path
+    (NoteStore.claim_next_index) must still find the registered branch's
+    row even though it was stored lowercase - previously this raised
+    'Unknown username.' internally for any non-lowercase query."""
+    branch_point, chain_code, cx1 = _branch()
+    client.get(f"/register?username=oscar&cx1={cx1}")
+
+    lnaddress = client.get("/.well-known/lnurlp/Oscar").json()
+    assert lnaddress["callback"] == "http://testserver/p/cb?username=Oscar"
+
+    pay_response = client.get(f"{lnaddress['callback']}&amount=5000")
+    assert pay_response.json().get("pr"), pay_response.text
+    node.settled.add(_payment_hash(node))
+
+    expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
+    data = client.get(f"/w?p={expected_id}").json()
+    assert data.get("maxWithdrawable") == 5000, data
