@@ -900,22 +900,24 @@ async def get_pay_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, problem)
         zap_request = nostr
 
-    if comment is not None or branch is None:
-        decoded_comment = _decode_note_ref(comment) if comment is not None else None
-        if decoded_comment is None:
-            raise HTTPException(
-                HTTPStatus.BAD_REQUEST,
-                "Missing or malformed comment: a hex-encoded 32-byte hashed secret, "
-                "or a cp1<pubkey>, is required to mint.",
-            )
+    decoded_comment = _decode_note_ref(comment) if comment is not None else None
+    if decoded_comment is not None:
         comment_hash, _ = decoded_comment
-    else:
-        # registered username, no comment supplied: auto-mint on this
-        # username's own branch (see this function's own docstring)
+    elif branch is not None:
+        # registered username: a comment that isn't a note ref (a payer's
+        # WALLET sending an ordinary human LUD-12 message, or nothing at
+        # all - e.g. a zap) doesn't block minting - auto-mint on this
+        # username's own branch instead (see this function's own docstring)
         branch_point, chain_code = branch[:32], branch[32:]
         assert username is not None
         comment_hash, _ = notes.claim_next_index(
             username, lambda i: derivation.derive_pubkey(branch_point, chain_code, i).hex()
+        )
+    else:
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            "Missing or malformed comment: a hex-encoded 32-byte hashed secret, "
+            "or a cp1<pubkey>, is required to mint.",
         )
     funding_source = _funding_source()
     try:

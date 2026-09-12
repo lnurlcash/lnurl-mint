@@ -145,6 +145,22 @@ def test_comment_is_still_honored_for_registered_username(client: TestClient, no
     assert _note_value(client, bech32m.decode_cp1(cp1).hex()) == 5000
 
 
+def test_ordinary_lud12_comment_automints_for_registered_username(client: TestClient, node: FakeNode):
+    """A payer's WALLET sending a plain human LUD-12 message (not a note
+    ref) must not block minting - it's ignored and the payment still
+    auto-mints on the username's own branch, same as no comment at all."""
+    branch_point, chain_code, cx1 = _branch()
+    client.get(f"/register?username=lenny&cx1={cx1}")
+    lnaddress = client.get("/.well-known/lnurlp/lenny").json()
+
+    pay_response = client.get(f"{lnaddress['callback']}&amount=5000&comment=gm!")
+    assert pay_response.json().get("pr"), pay_response.text
+    node.settled.add(_payment_hash(node))
+
+    expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
+    assert _note_value(client, expected_id) == 5000
+
+
 def test_username_registration_disabled_404s_register(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "username_registration_enabled", False)
     _, _, cx1 = _branch()
