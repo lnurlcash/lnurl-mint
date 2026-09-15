@@ -276,9 +276,9 @@ instead of watching the invoice itself. Once settled, the response's
 [LUD-25](../luds/25.md)) - unlike a plain LUD-21 proof-of-payment, that
 wallet needs it to claim the note at all, so it must be handed over despite
 `SERVICE`'s own node already being a permanent prior holder of that same
-secret; the wallet MUST rotate the note immediately after (see LUD-25's
-Security considerations) rather than treat verify as having closed that
-exposure window. `preimage` is fetched live from the funding source on every
+secret; the wallet MUST rotate the note immediately after rather than treat
+verify as having closed that exposure window (see "The observer race,
+plainly" below). `preimage` is fetched live from the funding source on every
 call, never cached locally, same as every other secret this mint handles.
 Unlike the ecosystem's usual convention, `VERIFY_ENABLED=false` disables the
 endpoint entirely (404), not just its advertisement - precisely because the

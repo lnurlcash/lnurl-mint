@@ -961,8 +961,9 @@ async def _pay_callback(
     32-byte hash here, committing to a `secret` only it knows, and once
     this invoice settles the resulting note is credited as `k1=<secret>`
     instead of the payment preimage (see settle_mint) - the preimage then
-    redeems nothing, closing the routing-node preimage race the spec's
-    Security considerations describes. `comment` is exactly that shape (or,
+    redeems nothing, closing the race a routing node forwarding this
+    invoice would otherwise win by learning the preimage itself. `comment`
+    is exactly that shape (or,
     per Part 2's Wallet-side ownership proofs, `cp1<pk>` - see
     _decode_note_ref); a malformed one is rejected outright rather than
     falling back to a preimage-keyed note, since a preimage-keyed note is

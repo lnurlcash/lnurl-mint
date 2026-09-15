@@ -10,9 +10,10 @@ class LnurlPayResponse(BaseModel):
 
     `commentAllowed` (LUD-12) advertises room for LUD-25's comment
     protection: a WALLET attaches `comment=hex(sha256(secret))`, a bare
-    hex-encoded 32-byte hash, to close the preimage race described in the
-    spec's Security considerations (see router.get_pay_callback) - 64
-    hex chars, exactly what's advertised here. `comment` is mandatory
+    hex-encoded 32-byte hash, to close the preimage-propagation race a
+    minted note's k1 would otherwise be exposed to (see
+    router.get_pay_callback) - 64 hex chars, exactly what's advertised
+    here. `comment` is mandatory
     here (missing or malformed rejects the mint outright), unlike LUD-12's
     own optional/free-text default use.
 

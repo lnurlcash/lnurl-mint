@@ -195,7 +195,8 @@ async def invoice_preimage(payment_hash: str, config: LightningBackendConfig) ->
     db.NoteStore's store-hashes-not-secrets policy), since for lnurlcash
     this preimage IS the bearer note's spend secret. Used by LUD-21 verify
     to hand it to a wallet with no node of its own, letting it claim and
-    rotate the note immediately per the spec's Security considerations."""
+    rotate the note immediately, closing the exposure window before anyone
+    else who saw the invoice can race it."""
     return await _dispatch("invoice_preimage", config, _invoice_preimage_lnd, _invoice_preimage_cln, payment_hash)
 
 

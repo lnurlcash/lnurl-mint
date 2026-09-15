@@ -131,9 +131,9 @@ class Settings(BaseSettings):
     # the response's `preimage` IS the freshly minted bearer note's spend
     # secret (see router.verify_invoice) - served to ANY holder of the
     # payment hash, which travels inside the invoice itself, so a wallet
-    # MUST rotate the note immediately after claiming it (LUD-25's
-    # Security considerations), and an operator unwilling to serve spend
-    # secrets to any invoice holder should turn this off. Unlike the
+    # MUST rotate the note immediately after claiming it, and an operator
+    # unwilling to serve spend secrets to any invoice holder should turn
+    # this off. Unlike the
     # ecosystem's usual convention, false here disables the endpoint
     # entirely (404), not just its advertisement - precisely because the
     # preimage is a bearer secret here, not mere proof of payment.
