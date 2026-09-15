@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from lnurl_mint import bech32m, derivation
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import FakeNode
+from tests.conftest import FakeNode, sign_schnorr_message
 
 # secp256k1 group order - needed to mirror derive_pubkey's BIP-340 x-only
 # tweak on the PRIVATE key side (see _ownership_sig).
@@ -69,8 +69,8 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
         derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
     )
     sk0 = PrivateKey.from_int((d + tweak) % _N)
-    message = sha256(f"LNURLcash:{action}:{username}".encode()).digest()
-    return sk0.sign_schnorr(message).hex()
+    message = f"LNURLcash:{action}:{username}".encode()
+    return sign_schnorr_message(sk0, message).hex()
 
 
 def _npub() -> tuple[bytes, str]:

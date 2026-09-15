@@ -3,7 +3,6 @@ for `cp1` notes - mint via comment=cp1<pk>, redeem via k1=ck1<pk><sig>, and
 the cs1 certificates issued alongside rotate/split/merge and the
 informational GET."""
 
-from hashlib import sha256
 from os import urandom
 
 from coincurve import PrivateKey, PublicKey
@@ -11,9 +10,9 @@ from fastapi.testclient import TestClient
 
 from lnurl_mint import bech32m
 from lnurl_mint.signing import lightning_signed_message_digest
-from tests.conftest import FakeNode
+from tests.conftest import FakeNode, sign_schnorr_message
 
-_CK1_MESSAGE = sha256(b"LNURLcash").digest()
+_CK1_MESSAGE = b"LNURLcash"
 
 
 def _note_keypair() -> tuple[PrivateKey, str]:
@@ -29,8 +28,16 @@ def _ck1(sk: PrivateKey) -> str:
     signature over the one fixed message every ck1 signs, per Encoding,
     with `sk`'s own x-only pubkey travelling alongside it."""
     pk_xonly = sk.public_key.format(compressed=True)[1:]
-    sig = sk.sign_schnorr(_CK1_MESSAGE)
+    sig = sign_schnorr_message(sk, _CK1_MESSAGE)
     return bech32m.encode_ck1(pk_xonly, sig)
+
+
+def test_ck1_matches_shared_conformance_vector():
+    sk = PrivateKey(bytes.fromhex("6257b20051d8bf990abef9274b05eec72deed8f6a6adae958e91ceb51e06136a"))
+    assert _ck1(sk) == (
+        "ck1t48us5upk2653jqzm94rhwvv9vnclm6kdeygs4z6hu0tkleml3ulwhtn60lj3h29m7mmztrgtlehqzuqg6e2n0ct3"
+        "mrldefxv50jpeg2d7ns73eqn6c8duewvhgq28wfultlwu0jhcyp7ag4x35k39t4puvjejfa"
+    )
 
 
 def _mint_cp1_note(client: TestClient, node: FakeNode, amount_msat: int) -> tuple[PrivateKey, str]:

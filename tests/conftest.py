@@ -45,6 +45,7 @@ import pytest
 from bolt11.models.tags import TagChar, Tags
 from bolt11.types import Bolt11
 from coincurve import PrivateKey
+from coincurve._libsecp256k1 import ffi, lib
 from fastapi.testclient import TestClient
 
 import lnurl_mint.node as node_module
@@ -54,6 +55,36 @@ from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from lnurl_mint.node import NodeInfo, PaymentFailed, PaymentResult
 from lnurl_mint.server import app
+
+
+def sign_schnorr_message(key: PrivateKey, message: bytes) -> bytes:
+    """Sign an arbitrary-length BIP-340 message in tests.
+
+    Coincurve's public signing convenience method is limited to 32-byte
+    messages, while its bundled libsecp256k1 and public verification method
+    support the arbitrary-length messages BIP-340 and LUD-25 specify. Use the
+    bundled custom signer here so integration tests exercise the exact wire
+    message instead of silently testing sha256(message).
+    """
+    keypair = ffi.new("secp256k1_keypair *")
+    assert lib.secp256k1_keypair_create(key.context.ctx, keypair, key.secret)
+
+    signature = ffi.new("unsigned char[64]")
+    params = ffi.new("secp256k1_schnorrsig_extraparams *")
+    for index, byte in enumerate(bytes.fromhex("da6fb38c")):
+        params.magic[index] = byte
+    params.noncefp = ffi.NULL
+    aux_randomness = ffi.new("unsigned char[32]", b"\x00" * 32)
+    params.ndata = aux_randomness
+    assert lib.secp256k1_schnorrsig_sign_custom(
+        key.context.ctx,
+        signature,
+        message,
+        len(message),
+        keypair,
+        params,
+    )
+    return bytes(ffi.buffer(signature, 64))
 
 
 def fresh_secret() -> tuple[str, str]:

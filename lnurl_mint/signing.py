@@ -132,12 +132,11 @@ def verify_note(pubkey_hex: str, note_id_hex: str, amount_msat: int, signature_h
 # a branch's index-0 key (ck1, and the registration ownership proof below)
 # is a plain BIP-340 Schnorr signature over a fixed domain string, verified
 # directly against the pubkey it's paired with (ck1) or already on file
-# (registration) - never recovered. libsecp256k1's schnorr verify wants an
-# exact 32-byte message, so the domain string is sha256'd once here purely
-# to fit that width, not for any domain-separation purpose of its own (the
-# distinct strings do that already).
+# (registration) - never recovered. BIP-340 and libsecp256k1 verification
+# both accept arbitrary-length messages; these protocol strings are passed
+# as their raw UTF-8 bytes exactly as 25.md specifies, without an extra hash.
 def _schnorr_message(message: str) -> bytes:
-    return sha256(message.encode()).digest()
+    return message.encode()
 
 
 # A `ck1` is a WALLET's signature with a `cp1` note's own sk, over this one
