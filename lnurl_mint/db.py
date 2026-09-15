@@ -534,15 +534,14 @@ class NoteStore:
         """Claims `username` for the watch-only branch `cx1_hex` (LUD-25
         Part 2's cx1 = hex(P || chain_code)), or wholesale replaces an
         existing claim's branch/npub with this call's own (see router.py's
-        POST /p/{username}) - a fresh claim is first-come-first-served, no
-        proof the caller actually controls the branch's private key
-        needed (`cx1` alone never grants spending, so a squatted
-        registration only costs the real owner a name, never funds);
-        router.py gates the OVERWRITE case behind its own ownership-proof
-        signature before ever calling this, since this method itself has
-        no way to tell a fresh claim from a hijack. `next_index` always
-        resets to 0 - an overwrite means a different branch, whose own
-        index 0 was never tried yet.
+        POST /p/{username}) - router.py gates every call behind its own
+        ownership-proof signature before ever calling this (a fresh claim
+        proves control of THIS cx1, an overwrite proves control of
+        whichever branch is already on file - see
+        upsert_registered_username's own docstring), since this method
+        itself has no way to tell a fresh claim from a hijack. `next_index`
+        always resets to 0 - an overwrite means a different branch, whose
+        own index 0 was never tried yet.
 
         `nostr_pubkey_hex`, if given, doubles `username` as a NIP-05 name
         (see nostr_pubkey/router.get_nip05) - a WALLET-supplied npub,

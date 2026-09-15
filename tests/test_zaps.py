@@ -15,19 +15,38 @@ from coincurve import PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from lnurl_mint import bech32m, nostr
+from lnurl_mint import bech32m, derivation, nostr
 from lnurl_mint import router as router_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
+from lnurl_mint.signing import lightning_signed_message_digest
 from tests.conftest import FakeNode
 
 MINT_KEY = urandom(32).hex()
 RELAYS = ["wss://relay.example", "wss://nos.example"]
 
+# secp256k1 group order - see test_username_registration.py's own copy of
+# this constant/helper for the full rationale (BIP-340 x-only tweak).
+_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
-def _branch() -> str:
+
+def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action: str, username: str) -> str:
+    d = p.to_int()
+    if p.public_key.format(compressed=True)[0] == 0x03:
+        d = _N - d
+    tweak = int.from_bytes(
+        derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
+    )
+    sk0 = PrivateKey.from_int((d + tweak) % _N)
+    digest = lightning_signed_message_digest(f"LNURLcash:{action}:{username}")
+    return sk0.sign_recoverable(digest, hasher=None).hex()
+
+
+def _branch() -> tuple[PrivateKey, bytes, bytes, str]:
     p = PrivateKey()
-    return bech32m.encode_cx1(p.public_key.format(compressed=True)[1:] + urandom(32))
+    branch_point = p.public_key.format(compressed=True)[1:]
+    chain_code = urandom(32)
+    return p, branch_point, chain_code, bech32m.encode_cx1(branch_point + chain_code)
 
 
 def _zap_request(amount_msat: int | None = 21_000, recipient: str | None = None, **overrides: Any) -> dict[str, Any]:
@@ -62,8 +81,10 @@ def zaps(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> list[tuple[list
 
 def _register(client: TestClient) -> str:
     """A fresh username each time: the store outlives one test."""
-    username = f"zap{urandom(4).hex()}"
-    assert client.post(f"/p/{username}?cx1={_branch()}").json() == {"status": "OK"}
+    username = f"zap{urandom(4).hex()}"  # .hex() is always lowercase already
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", username)
+    assert client.post(f"/p/{username}?cx1={cx1}&sig={sig}").json() == {"status": "OK"}
     return username
 
 

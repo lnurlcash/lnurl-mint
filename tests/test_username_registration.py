@@ -1,8 +1,11 @@
 """LUD-25 Part 2, Seed & derivation's cx1 registration (router.py's
 POST/DELETE /p/{username}): a WALLET claims a Lightning Address username
 against its own watch-only branch, and this mint auto-mints cp1 notes off
-it directly. Overwriting or deleting an existing claim needs an
-ownership-proof signature over the branch's own index-0 secret."""
+it directly. Every register/unregister call needs an ownership-proof
+signature - a fresh claim over the branch being submitted right now, an
+overwrite or delete over whichever branch is already on file (see
+router._owns_branch and upsert_registered_username's own docstring for why
+those differ) - there is no proof-free case."""
 
 import json
 from hashlib import sha256
@@ -21,6 +24,12 @@ from tests.conftest import FakeNode
 # secp256k1 group order - needed to mirror derive_pubkey's BIP-340 x-only
 # tweak on the PRIVATE key side (see _ownership_sig).
 _N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+# a well-formed-length but cryptographically meaningless signature - used
+# wherever a test needs *some* sig value present (sig is a required query
+# param on every register/unregister call now) but wants the ownership
+# check itself to fail, not FastAPI's own missing-parameter validation.
+_BOGUS_SIG = "00" * 65
 
 
 def _branch() -> tuple[PrivateKey, bytes, bytes, str]:
@@ -46,9 +55,13 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
     own index-0 secret. Signed over
     "LNURLcash:<action>:<username>" (25.md's Seed & derivation; a
     different message than a note's own ck1 - see signing.py),
-    recoverable. `action` is "register" (an overwrite, matching
-    upsert_registered_username) or "unregister" (matching
-    delete_registered_username) - the two are never interchangeable."""
+    recoverable. `action` is "register" (a fresh claim OR an overwrite -
+    upsert_registered_username checks it against a different branch
+    depending on which) or "unregister" (matching
+    delete_registered_username) - the two are never interchangeable.
+    `username` must already be lowercase: the endpoint lowercases it
+    before ever checking a signature, so a sig signed over a mixed-case
+    username would simply never match."""
     d = p.to_int()
     if p.public_key.format(compressed=True)[0] == 0x03:
         d = _N - d
@@ -87,17 +100,40 @@ def _note_value(client: TestClient, note_id_hex: str) -> int | None:
 
 
 def test_register_claims_a_username(client: TestClient):
-    _, _, _, cx1 = _branch()
-    resp = client.post(f"/p/alice?cx1={cx1}")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "alice")
+    resp = client.post(f"/p/alice?cx1={cx1}&sig={sig}")
     assert resp.json() == {"status": "OK"}
     assert notes.username_branch("alice") == bech32m.decode_cx1(cx1).hex()
 
 
-def test_overwrite_without_ownership_proof_rejected(client: TestClient):
+def test_register_without_a_signature_rejected(client: TestClient):
+    """`sig` is a required parameter now - even a fresh, unclaimed
+    username is never proof-free (25.md's Seed & derivation)."""
     _, _, _, cx1 = _branch()
-    assert client.post(f"/p/bob?cx1={cx1}").json()["status"] == "OK"
+    resp = client.post(f"/p/quentin?cx1={cx1}")
+    assert resp.json()["status"] == "ERROR"
+    assert notes.username_branch("quentin") is None
+
+
+def test_register_fresh_claim_with_wrong_signature_rejected(client: TestClient):
+    """A fresh claim's proof must be over the NEW cx1 being submitted -
+    signed by any OTHER key, it's rejected outright, exactly like an
+    overwrite's own wrong-signature case."""
+    _, _, _, cx1 = _branch()
+    wrong_p, wrong_branch_point, wrong_chain_code, _ = _branch()
+    sig = _ownership_sig(wrong_p, wrong_branch_point, wrong_chain_code, "register", "walter")
+    resp = client.post(f"/p/walter?cx1={cx1}&sig={sig}")
+    assert resp.json()["status"] == "ERROR"
+    assert notes.username_branch("walter") is None
+
+
+def test_overwrite_without_ownership_proof_rejected(client: TestClient):
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "bob")
+    assert client.post(f"/p/bob?cx1={cx1}&sig={sig}").json()["status"] == "OK"
     _, _, _, cx1_2 = _branch()
-    resp = client.post(f"/p/bob?cx1={cx1_2}")
+    resp = client.post(f"/p/bob?cx1={cx1_2}&sig={_BOGUS_SIG}")
     assert resp.json()["status"] == "ERROR"
     # rejected outright: the original branch is untouched
     assert notes.username_branch("bob") == bech32m.decode_cx1(cx1).hex()
@@ -105,7 +141,8 @@ def test_overwrite_without_ownership_proof_rejected(client: TestClient):
 
 def test_overwrite_with_wrong_signature_rejected(client: TestClient):
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/carol?cx1={cx1}")
+    sig0 = _ownership_sig(p, branch_point, chain_code, "register", "carol")
+    client.post(f"/p/carol?cx1={cx1}&sig={sig0}")
     wrong_p, _, _, _ = _branch()
     sig = _ownership_sig(wrong_p, wrong_p.public_key.format(compressed=True)[1:], urandom(32), "register", "carol")
     _, _, _, cx1_2 = _branch()
@@ -116,8 +153,12 @@ def test_overwrite_with_wrong_signature_rejected(client: TestClient):
 
 def test_overwrite_with_valid_ownership_proof_replaces_the_branch(client: TestClient):
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/dana?cx1={cx1}")
     sig = _ownership_sig(p, branch_point, chain_code, "register", "dana")
+    client.post(f"/p/dana?cx1={cx1}&sig={sig}")
+    # same key both times: the fresh claim above proved control of `cx1`
+    # itself, this overwrite proves continued control of that SAME branch
+    # (still on file), a different check that happens to need an
+    # identical signature only because nothing about the branch changed
     _, _, _, cx1_2 = _branch()
     resp = client.post(f"/p/dana?cx1={cx1_2}&sig={sig}")
     assert resp.json() == {"status": "OK"}
@@ -127,10 +168,10 @@ def test_overwrite_with_valid_ownership_proof_replaces_the_branch(client: TestCl
 def test_overwrite_omitting_npub_clears_it(client: TestClient):
     p, branch_point, chain_code, cx1 = _branch()
     _, npub = _npub()
-    client.post(f"/p/edna?cx1={cx1}&npub={npub}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "edna")
+    client.post(f"/p/edna?cx1={cx1}&npub={npub}&sig={sig}")
     assert client.get("/.well-known/nostr.json?name=edna").json()["names"]
 
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "edna")
     resp = client.post(f"/p/edna?cx1={cx1}&sig={sig}")
     assert resp.json() == {"status": "OK"}
     assert client.get("/.well-known/nostr.json?name=edna").json() == {"names": {}}
@@ -138,19 +179,20 @@ def test_overwrite_omitting_npub_clears_it(client: TestClient):
 
 def test_register_rejects_reserved_username(client: TestClient):
     _, _, _, cx1 = _branch()
-    assert client.post(f"/p/{settings.username}?cx1={cx1}").json()["status"] == "ERROR"
-    assert client.post(f"/p/_?cx1={cx1}").json()["status"] == "ERROR"
+    assert client.post(f"/p/{settings.username}?cx1={cx1}&sig={_BOGUS_SIG}").json()["status"] == "ERROR"
+    assert client.post(f"/p/_?cx1={cx1}&sig={_BOGUS_SIG}").json()["status"] == "ERROR"
 
 
 def test_register_rejects_malformed_cx1(client: TestClient):
-    resp = client.post("/p/finn?cx1=notbech32m")
+    resp = client.post(f"/p/finn?cx1=notbech32m&sig={_BOGUS_SIG}")
     assert resp.json()["status"] == "ERROR"
 
 
 def test_register_with_npub_serves_nip05(client: TestClient):
-    _, _, _, cx1 = _branch()
+    p, branch_point, chain_code, cx1 = _branch()
     pubkey, npub = _npub()
-    resp = client.post(f"/p/mallory?cx1={cx1}&npub={npub}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "mallory")
+    resp = client.post(f"/p/mallory?cx1={cx1}&npub={npub}&sig={sig}")
     assert resp.json() == {"status": "OK"}
 
     nip05 = client.get("/.well-known/nostr.json?name=mallory").json()
@@ -158,15 +200,17 @@ def test_register_with_npub_serves_nip05(client: TestClient):
 
 
 def test_register_without_npub_has_no_nip05_name(client: TestClient):
-    _, _, _, cx1 = _branch()
-    client.post(f"/p/nora?cx1={cx1}")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "nora")
+    client.post(f"/p/nora?cx1={cx1}&sig={sig}")
     nip05 = client.get("/.well-known/nostr.json?name=nora").json()
     assert nip05 == {"names": {}}
 
 
 def test_register_rejects_malformed_npub(client: TestClient):
-    _, _, _, cx1 = _branch()
-    resp = client.post(f"/p/oscarnpub?cx1={cx1}&npub=notanpub")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "oscarnpub")
+    resp = client.post(f"/p/oscarnpub?cx1={cx1}&npub=notanpub&sig={sig}")
     assert resp.json()["status"] == "ERROR"
     assert notes.username_branch("oscarnpub") is None
 
@@ -178,24 +222,27 @@ def test_nip05_unknown_name_returns_empty_names(client: TestClient):
 def test_nip05_with_no_name_returns_empty_names(client: TestClient):
     """Never dumps the whole directory - only the one name asked about,
     and no `name` at all asks about none."""
-    _, _, _, cx1 = _branch()
+    p, branch_point, chain_code, cx1 = _branch()
     _, npub = _npub()
-    client.post(f"/p/petra?cx1={cx1}&npub={npub}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "petra")
+    client.post(f"/p/petra?cx1={cx1}&npub={npub}&sig={sig}")
     assert client.get("/.well-known/nostr.json").json() == {"names": {}}
 
 
 def test_nip05_lookup_is_case_insensitive_but_echoes_the_queried_name(client: TestClient):
-    _, _, _, cx1 = _branch()
+    p, branch_point, chain_code, cx1 = _branch()
     pubkey, npub = _npub()
-    client.post(f"/p/Quinn?cx1={cx1}&npub={npub}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "quinn")
+    client.post(f"/p/Quinn?cx1={cx1}&npub={npub}&sig={sig}")
     nip05 = client.get("/.well-known/nostr.json?name=QUINN").json()
     assert nip05 == {"names": {"QUINN": pubkey.hex()}}
 
 
 def test_nip05_hidden_while_username_registration_disabled(client: TestClient, monkeypatch):
-    _, _, _, cx1 = _branch()
+    p, branch_point, chain_code, cx1 = _branch()
     _, npub = _npub()
-    client.post(f"/p/ray?cx1={cx1}&npub={npub}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "ray")
+    client.post(f"/p/ray?cx1={cx1}&npub={npub}&sig={sig}")
     monkeypatch.setattr(settings, "username_registration_enabled", False)
     assert client.get("/.well-known/nostr.json?name=ray").json() == {"names": {}}
 
@@ -206,8 +253,9 @@ def test_unregistered_username_404s(client: TestClient):
 
 
 def test_registered_lnaddress_callback_carries_username(client: TestClient):
-    _, _, _, cx1 = _branch()
-    client.post(f"/p/dave?cx1={cx1}")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "dave")
+    client.post(f"/p/dave?cx1={cx1}&sig={sig}")
     data = client.get("/.well-known/lnurlp/dave").json()
     assert data["callback"] == "http://testserver/p/dave"
     assert data["tag"] == "payRequest"
@@ -218,8 +266,9 @@ def test_registered_lnaddress_metadata_advertises_xpub_for_internal_transfers(cl
     metadata carries its own `cx1`, so a payer's WALLET already holding a
     note on this mint can skip Lightning entirely - deriving the next note
     key itself rather than paying an invoice."""
-    _, _, _, cx1 = _branch()
-    client.post(f"/p/gina?cx1={cx1}")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "gina")
+    client.post(f"/p/gina?cx1={cx1}&sig={sig}")
     metadata = json.loads(client.get("/.well-known/lnurlp/gina").json()["metadata"])
     assert ["text/xpub", f"{cx1}:0"] in metadata
 
@@ -236,8 +285,9 @@ def test_xpub_index_hint_advances_after_an_automint(client: TestClient, node: Fa
     at callback (invoice-creation) time, not at settlement - so the
     advertised hint must already reflect that on the very next lookup,
     even before this particular invoice is paid."""
-    _, _, _, cx1 = _branch()
-    client.post(f"/p/hana?cx1={cx1}")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "hana")
+    client.post(f"/p/hana?cx1={cx1}&sig={sig}")
     lnaddress = client.get("/.well-known/lnurlp/hana").json()
     metadata = json.loads(lnaddress["metadata"])
     assert ["text/xpub", f"{cx1}:0"] in metadata
@@ -255,7 +305,8 @@ def test_internal_transfer_skips_lightning_via_rotate(client: TestClient, node: 
     metadata and lands a note directly on his branch via an ordinary
     rotate - never paying a Lightning invoice to `ivan`'s address at all."""
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/ivan?cx1={cx1}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "ivan")
+    client.post(f"/p/ivan?cx1={cx1}&sig={sig}")
     metadata = json.loads(client.get("/.well-known/lnurlp/ivan").json()["metadata"])
     xpub_entry = next(entry for entry in metadata if entry[0] == "text/xpub")
     advertised_cx1, index_hint = xpub_entry[1].rsplit(":", 1)
@@ -287,7 +338,8 @@ def test_internal_transfer_to_a_stale_index_is_rejected_like_any_collision(
     advertised index, the second one must fail cleanly, exactly like any
     other already-in-use p1, never double-credit or overwrite."""
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/jack?cx1={cx1}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "jack")
+    client.post(f"/p/jack?cx1={cx1}&sig={sig}")
     pk0 = derivation.derive_pubkey(branch_point, chain_code, 0)
     cp1 = bech32m.encode_cp1(pk0)
 
@@ -305,7 +357,8 @@ def test_internal_transfer_to_a_stale_index_is_rejected_like_any_collision(
 
 def test_paying_registered_address_with_no_comment_automints(client: TestClient, node: FakeNode):
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/erin?cx1={cx1}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "erin")
+    client.post(f"/p/erin?cx1={cx1}&sig={sig}")
 
     lnaddress = client.get("/.well-known/lnurlp/erin").json()
     pay_response = client.get(f"{lnaddress['callback']}?amount=5000")
@@ -318,7 +371,8 @@ def test_paying_registered_address_with_no_comment_automints(client: TestClient,
 
 def test_second_automint_payment_uses_the_next_index(client: TestClient, node: FakeNode):
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/frank?cx1={cx1}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "frank")
+    client.post(f"/p/frank?cx1={cx1}&sig={sig}")
     lnaddress = client.get("/.well-known/lnurlp/frank").json()
 
     for _ in range(2):
@@ -338,7 +392,8 @@ def test_automint_skips_an_index_already_taken_by_a_manual_mint(client: TestClie
     first), the auto-mint path must skip to the next free index rather
     than double-credit or collide."""
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/grace?cx1={cx1}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "grace")
+    client.post(f"/p/grace?cx1={cx1}&sig={sig}")
 
     pk0 = derivation.derive_pubkey(branch_point, chain_code, 0)
     manual = client.get(f"/p/cb?amount=1000&comment={bech32m.encode_cp1(pk0)}")
@@ -358,8 +413,9 @@ def test_automint_skips_an_index_already_taken_by_a_manual_mint(client: TestClie
 def test_comment_is_still_honored_for_registered_username(client: TestClient, node: FakeNode):
     """The address owner minting for themselves with a specific key already
     in hand overrides auto-derivation."""
-    _, _, _, cx1 = _branch()
-    client.post(f"/p/henry?cx1={cx1}")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "henry")
+    client.post(f"/p/henry?cx1={cx1}&sig={sig}")
     sk = PrivateKey()
     cp1 = bech32m.encode_cp1(sk.public_key.format(compressed=True)[1:])
 
@@ -374,7 +430,8 @@ def test_ordinary_lud12_comment_automints_for_registered_username(client: TestCl
     ref) must not block minting - it's ignored and the payment still
     auto-mints on the username's own branch, same as no comment at all."""
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/lenny?cx1={cx1}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "lenny")
+    client.post(f"/p/lenny?cx1={cx1}&sig={sig}")
     lnaddress = client.get("/.well-known/lnurlp/lenny").json()
 
     pay_response = client.get(f"{lnaddress['callback']}?amount=5000&comment=gm!")
@@ -388,13 +445,14 @@ def test_ordinary_lud12_comment_automints_for_registered_username(client: TestCl
 def test_username_registration_disabled_404s_register(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "username_registration_enabled", False)
     _, _, _, cx1 = _branch()
-    resp = client.post(f"/p/iris?cx1={cx1}")
+    resp = client.post(f"/p/iris?cx1={cx1}&sig={_BOGUS_SIG}")
     assert resp.json() == {"status": "ERROR", "reason": "Not found"}
 
 
 def test_username_registration_disabled_hides_registered_address(client: TestClient, monkeypatch):
-    _, _, _, cx1 = _branch()
-    client.post(f"/p/jill?cx1={cx1}")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "jill")
+    client.post(f"/p/jill?cx1={cx1}&sig={sig}")
     monkeypatch.setattr(settings, "username_registration_enabled", False)
     resp = client.get("/.well-known/lnurlp/jill")
     assert resp.json() == {"status": "ERROR", "reason": "Unknown user."}
@@ -405,8 +463,9 @@ def test_registration_lowercases_a_mixed_case_username(client: TestClient):
     registers as 'kevin', so every lookup site (which also lowercases its
     own input) resolves it the same way regardless of how a client
     capitalized either side."""
-    _, _, _, cx1 = _branch()
-    resp = client.post(f"/p/Kevin?cx1={cx1}")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "kevin")
+    resp = client.post(f"/p/Kevin?cx1={cx1}&sig={sig}")
     assert resp.json() == {"status": "OK"}
     assert notes.username_branch("kevin") == bech32m.decode_cx1(cx1).hex()
     assert notes.username_branch("Kevin") is None  # stored lowercase, not as typed
@@ -416,8 +475,9 @@ def test_lnaddress_lookup_is_case_insensitive(client: TestClient):
     """A payer's client capitalizing the local-part differently than how
     it was registered (e.g. Alice@host vs alice@host) must still resolve -
     LUD-16 local-parts are conventionally case-insensitive."""
-    _, _, _, cx1 = _branch()
-    client.post(f"/p/liam?cx1={cx1}")
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "liam")
+    client.post(f"/p/liam?cx1={cx1}&sig={sig}")
     lower = client.get("/.well-known/lnurlp/liam").json()
     mixed = client.get("/.well-known/lnurlp/Liam").json()
     upper = client.get("/.well-known/lnurlp/LIAM").json()
@@ -429,10 +489,11 @@ def test_registered_lnaddress_case_insensitive_duplicate_rejected(client: TestCl
     same row, so it hits the overwrite path - and without an ownership
     proof for the branch already on file, that's rejected, not a silent
     second, differently-cased identity for the same logical username."""
-    _, _, _, cx1 = _branch()
-    assert client.post(f"/p/noah?cx1={cx1}").json()["status"] == "OK"
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "noah")
+    assert client.post(f"/p/noah?cx1={cx1}&sig={sig}").json()["status"] == "OK"
     _, _, _, cx1_2 = _branch()
-    resp = client.post(f"/p/Noah?cx1={cx1_2}")
+    resp = client.post(f"/p/Noah?cx1={cx1_2}&sig={_BOGUS_SIG}")
     assert resp.json()["status"] == "ERROR"
     assert notes.username_branch("noah") == bech32m.decode_cx1(cx1).hex()
 
@@ -451,7 +512,8 @@ def test_automint_works_with_mixed_case_username_in_callback(client: TestClient,
     row even though it was stored lowercase - previously this raised
     'Unknown username.' internally for any non-lowercase query."""
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/oscar?cx1={cx1}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "oscar")
+    client.post(f"/p/oscar?cx1={cx1}&sig={sig}")
 
     lnaddress = client.get("/.well-known/lnurlp/Oscar").json()
     assert lnaddress["callback"] == "http://testserver/p/Oscar"
@@ -466,28 +528,33 @@ def test_automint_works_with_mixed_case_username_in_callback(client: TestClient,
 
 
 def test_delete_requires_ownership_proof(client: TestClient):
-    _, _, _, cx1 = _branch()
-    client.post(f"/p/percy?cx1={cx1}")
-    resp = client.delete("/p/percy?sig=" + "00" * 65)
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "percy")
+    client.post(f"/p/percy?cx1={cx1}&sig={sig}")
+    resp = client.delete(f"/p/percy?sig={_BOGUS_SIG}")
     assert resp.json()["status"] == "ERROR"
     assert notes.username_branch("percy") is not None
 
 
 def test_delete_with_valid_signature_frees_the_username(client: TestClient):
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/quincy?cx1={cx1}")
+    sig0 = _ownership_sig(p, branch_point, chain_code, "register", "quincy")
+    client.post(f"/p/quincy?cx1={cx1}&sig={sig0}")
     sig = _ownership_sig(p, branch_point, chain_code, "unregister", "quincy")
     resp = client.delete(f"/p/quincy?sig={sig}")
     assert resp.json() == {"status": "OK"}
     assert notes.username_branch("quincy") is None
 
-    # freed: anyone can claim it again, no proof needed for a fresh claim
-    _, _, _, cx1_2 = _branch()
-    assert client.post(f"/p/quincy?cx1={cx1_2}").json()["status"] == "OK"
+    # freed: anyone can claim it again - still needs to prove it controls
+    # the NEW branch being submitted, same as any other fresh claim
+    # (register is never proof-free, not even right after a delete)
+    p2, branch_point2, chain_code2, cx1_2 = _branch()
+    sig2 = _ownership_sig(p2, branch_point2, chain_code2, "register", "quincy")
+    assert client.post(f"/p/quincy?cx1={cx1_2}&sig={sig2}").json()["status"] == "OK"
 
 
 def test_delete_unknown_username_404s(client: TestClient):
-    resp = client.delete("/p/nobody?sig=" + "00" * 65)
+    resp = client.delete(f"/p/nobody?sig={_BOGUS_SIG}")
     assert resp.json() == {"status": "ERROR", "reason": "Unknown user."}
 
 
@@ -498,9 +565,9 @@ def test_register_signature_cannot_be_replayed_as_unregister(client: TestClient)
     (e.g. visible in a GET request log) could be replayed to delete the
     same username outright."""
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/sybil?cx1={cx1}")
-    register_sig = _ownership_sig(p, branch_point, chain_code, "register", "sybil")
-    resp = client.delete(f"/p/sybil?sig={register_sig}")
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "sybil")
+    client.post(f"/p/sybil?cx1={cx1}&sig={sig}")
+    resp = client.delete(f"/p/sybil?sig={sig}")
     assert resp.json()["status"] == "ERROR"
     assert notes.username_branch("sybil") is not None
 
@@ -511,8 +578,10 @@ def test_ownership_signature_cannot_be_replayed_across_usernames(client: TestCli
     that happens to share that same branch - 25.md binds `username` into
     the signed message specifically to prevent this."""
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/tanya?cx1={cx1}")
-    client.post(f"/p/ursula?cx1={cx1}")
+    sig_tanya = _ownership_sig(p, branch_point, chain_code, "register", "tanya")
+    sig_ursula = _ownership_sig(p, branch_point, chain_code, "register", "ursula")
+    client.post(f"/p/tanya?cx1={cx1}&sig={sig_tanya}")
+    client.post(f"/p/ursula?cx1={cx1}&sig={sig_ursula}")
     sig_for_tanya = _ownership_sig(p, branch_point, chain_code, "unregister", "tanya")
     resp = client.delete(f"/p/ursula?sig={sig_for_tanya}")
     assert resp.json()["status"] == "ERROR"
@@ -521,7 +590,8 @@ def test_ownership_signature_cannot_be_replayed_across_usernames(client: TestCli
 
 def test_delete_disabled_while_username_registration_disabled(client: TestClient, monkeypatch):
     p, branch_point, chain_code, cx1 = _branch()
-    client.post(f"/p/river?cx1={cx1}")
+    sig0 = _ownership_sig(p, branch_point, chain_code, "register", "river")
+    client.post(f"/p/river?cx1={cx1}&sig={sig0}")
     sig = _ownership_sig(p, branch_point, chain_code, "unregister", "river")
     monkeypatch.setattr(settings, "username_registration_enabled", False)
     resp = client.delete(f"/p/river?sig={sig}")

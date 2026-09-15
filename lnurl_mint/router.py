@@ -663,7 +663,7 @@ def _registrable_username(username: str) -> bool:
     return bool(_USERNAME_PATTERN.match(username)) and not _known_username(username)
 
 
-def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str | None) -> bool:
+def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str) -> bool:
     """Whether `sig_hex` is a valid ownership-proof signature (see
     signing.recover_register_pubkey) for `branch_hex`'s own index-0
     public key - "the first secret" a WALLET derives on a branch, the
@@ -674,12 +674,13 @@ def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str | Non
     username's proof or this same username's other action, so a
     signature captured from one overwrite/delete can never be replayed
     against a different username sharing this branch, or against the
-    other action for this same one. Gates upsert_registered_username's
-    overwrite path and delete_registered_username outright - never a
-    fresh, unclaimed registration, which stays proof-free (see those
-    functions' own docstrings)."""
-    if sig_hex is None:
-        return False
+    other action for this same one. Gates every path through
+    upsert_registered_username (both a fresh claim, proven against the NEW
+    cx1 being submitted, and an overwrite, proven against whichever branch
+    is CURRENTLY on file - see that function's own docstring for why those
+    differ) and delete_registered_username outright - there is no
+    proof-free case left; `sig` is a required parameter at both call
+    sites, never optional."""
     branch = bytes.fromhex(branch_hex)
     branch_point, chain_code = branch[:32], branch[32:]
     expected = derivation.derive_pubkey(branch_point, chain_code, 0)
@@ -691,9 +692,7 @@ def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str | Non
 
 
 @router.post("/p/{username}", tags=["lnurlcash"])
-def upsert_registered_username(
-    username: str, cx1: str, npub: str | None = None, sig: str | None = None
-) -> RegisterUsernameResponse:
+def upsert_registered_username(username: str, cx1: str, sig: str, npub: str | None = None) -> RegisterUsernameResponse:
     """LUD-25 Part 2, Seed & derivation's cx1 registration: claims
     `username` for a WALLET's watch-only branch export (`cx1<P || chain
     code>`), so paying `.well-known/lnurlp/{username}` with no comment
@@ -701,21 +700,20 @@ def upsert_registered_username(
     received (see get_pay_callback_for_username, NoteStore.claim_next_index)
     - no per-payment WALLET involvement needed.
 
-    A fresh, unclaimed `username` is first-come-first-served, no proof the
-    caller actually controls the branch's private key: `cx1` alone never
-    grants spending (only a note's own `sk_i` does - see 25.md's Encoding
-    and Wallet-side ownership proofs), so a squatted registration only
-    costs the real owner a name, never funds. Calling this again on an
-    ALREADY-registered `username` instead overwrites it wholesale (new
-    `cx1`, new or absent `npub`) - and that path does need proof: `sig`,
-    an ownership-proof signature (see _owns_branch) made with the
-    CURRENTLY registered branch's own index-0 secret key, over
-    "LNURLcash:register:<username>" (signing.recover_register_pubkey) so
-    it can never be confused with a note's own `ck1`, another username's
-    proof, or this same username's unregister proof. It proves continued
-    control of what's on file already, not of the new `cx1` being switched
-    to - a WALLET migrating to a new seed still holds its old one long
-    enough to sign this once.
+    Always proven, never proof-free - even for a fresh, unclaimed
+    `username`: `sig` (see _owns_branch) is a required ownership-proof
+    signature over "LNURLcash:register:<username>"
+    (signing.recover_register_pubkey), so it can never be confused with a
+    note's own `ck1`, another username's proof, or this same username's
+    unregister proof. What it must prove differs by case, though:
+    - A fresh claim proves the caller actually controls the `cx1` being
+      submitted right now (signed with THAT branch's own index-0 secret
+      key).
+    - Calling this again on an ALREADY-registered `username` instead
+      overwrites it wholesale (new `cx1`, new or absent `npub`) - proving
+      continued control of the branch CURRENTLY on file instead, not of
+      the new `cx1` being switched to (a WALLET migrating to a new seed
+      still holds its old one long enough to sign this once).
 
     `username` is lowercased before validation and storage - a registered
     username is always case-insensitive (see _known_username), so this is
@@ -741,8 +739,13 @@ def upsert_registered_username(
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid npub.")
         nostr_pubkey_hex = decoded_npub.hex()
     existing_branch_hex = notes.username_branch(username)
-    if existing_branch_hex is not None and not _owns_branch("register", username, existing_branch_hex, sig):
-        raise HTTPException(HTTPStatus.BAD_REQUEST, "Ownership proof required to overwrite an existing registration.")
+    # a fresh claim proves control of the NEW branch being submitted; an
+    # overwrite proves continued control of whichever branch is CURRENTLY
+    # on file instead - see this function's own docstring for why those
+    # must differ
+    proof_branch_hex = existing_branch_hex if existing_branch_hex is not None else branch.hex()
+    if not _owns_branch("register", username, proof_branch_hex, sig):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid ownership signature.")
     notes.upsert_username(username, branch.hex(), nostr_pubkey_hex)
     return RegisterUsernameResponse()
 

@@ -29,6 +29,31 @@ def test_wire_endpoints_are_reachable_cross_origin(client: TestClient, path: str
     assert response.headers["access-control-allow-origin"] == "*"
 
 
+@pytest.mark.parametrize("method", ["POST", "DELETE"])
+def test_username_registration_preflight_allows_its_own_method(client: TestClient, method: str):
+    # Regression guard for the exact bug this repo shipped: allow_methods
+    # used to be ["GET"], and every test above only ever exercises a plain
+    # GET. Starlette's CORSMiddleware answers a "simple" cross-origin
+    # request (a bodyless GET/POST, like this mint's own registerUsername
+    # call) from an unconditional path that never even looks at
+    # allow_methods - only a real preflight does, which a browser always
+    # sends before a non-simple method like DELETE. A GET-only allow_methods
+    # value therefore passed every GET-based check above while still
+    # 400-ing the actual preflight ahead of POST/DELETE /p/{username}
+    # (router.upsert_registered_username, delete_registered_username) - the
+    # two non-GET wire calls this mint actually has, and the one a browser
+    # wallet's unregister call was silently failing on.
+    response = client.options(
+        "/p/someusername",
+        headers={
+            "Origin": "https://wallet.example",
+            "Access-Control-Request-Method": method,
+        },
+    )
+    assert response.status_code == 200
+    assert method in response.headers["access-control-allow-methods"]
+
+
 def test_startup_disables_the_uvicorn_access_logger():
     # LUD-25: a bearer note's k1 sits in the query string of /w and
     # /w/cb for as long as it's held, so the default per-request

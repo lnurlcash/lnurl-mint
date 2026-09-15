@@ -190,8 +190,16 @@ app = FastAPI(
 
 # every endpoint here is a public LNURL wire-protocol endpoint, meant to be
 # fetched cross-origin by arbitrary third-party wallets; none reads a
-# cookie, so a wide-open origin is safe
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+# cookie, so a wide-open origin is safe. allow_methods must cover more than
+# GET: POST/DELETE /p/{username} (router.upsert_registered_username,
+# delete_registered_username) are real cross-origin wallet calls too, and a
+# non-GET method always triggers a real preflight (unlike a bodyless GET/
+# POST, which Starlette's CORSMiddleware answers from its own unconditional
+# simple-response path regardless of allow_methods - only the preflight
+# path actually checks this list, which is exactly why a GET-only value
+# here silently passed every existing GET-based check while still 400-ing
+# any browser's DELETE preflight).
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(router)
 app.include_router(frontend_router)
