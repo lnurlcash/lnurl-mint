@@ -1,4 +1,6 @@
 from bech32 import CHARSET, bech32_decode, bech32_hrp_expand, bech32_polymod, convertbits
+from bolt11.exceptions import Bolt11AmountInvalidException
+from bolt11.utils import amount_to_msat, msat_to_amount
 
 # LUD-25 Part 2 Encoding: cp1/ck1/cs1/cx1 are BIP-350 bech32m (not classic
 # bech32 - that's LUD-01's `lnurl_encode` in frontend.py, a different
@@ -81,8 +83,54 @@ encode_cp1, decode_cp1 = _fixed_length_codec("cp", 32)
 # the bearer secret for a cp1 note, submitted in place of a revealed k1.
 encode_ck1, decode_ck1 = _fixed_length_codec("ck", 65)
 # cs1<sig>: the same 65-byte shape, produced by SERVICE instead - an
-# issuance certificate, never a spend authorization on its own.
-encode_cs1, decode_cs1 = _fixed_length_codec("cs", 65)
+# issuance certificate, never a spend authorization on its own. Unlike the
+# other three, its HRP is not the fixed 2-char "cs": it carries the
+# certificate's own amount_msat the same way a BOLT-11 invoice's HRP folds
+# in its amount (e.g. "cs10n" for 1000 msat) - decoded/encoded via BOLT-11's
+# own amount<>multiplier rules (bolt11.utils), unchanged here per 25.md's
+# Encoding - so a verifier reads the amount straight off the certificate,
+# nothing needs to travel alongside it. That variable-width HRP is why cs1
+# can't reuse _fixed_length_codec (built for a fixed 2-char one) like its
+# siblings do.
+def encode_cs1(amount_msat: int, signature: bytes) -> str:
+    if len(signature) != 65:
+        raise ValueError(f"cs1... payload must be 65 bytes, got {len(signature)}")
+    return encode(f"cs{msat_to_amount(amount_msat)}", signature)
+
+
+def decode_cs1(s: str) -> tuple[int, bytes] | None:
+    """Inverse of encode_cs1: (amount_msat, signature), or None on any
+    malformed input - missing/unparsable "cs<amount>" HRP, bad checksum, or
+    a non-65-byte payload - never raises, same contract as decode() above.
+    Reimplements decode()'s body rather than calling it: that function
+    matches against one fixed, already-known `hrp`, but here the HRP itself
+    (specifically, the amount encoded in it) is exactly what's being
+    recovered, so it has to be split out of `s` before the checksum can
+    even be verified against it."""
+    if any(ord(c) < 33 or ord(c) > 126 for c in s):
+        return None
+    if s.lower() != s and s.upper() != s:
+        return None
+    s = s.lower()
+    pos = s.rfind("1")
+    if pos < 1 or pos + 7 > len(s):
+        return None
+    found_hrp, data_part = s[:pos], s[pos + 1 :]
+    if not found_hrp.startswith("cs") or not all(c in CHARSET for c in data_part):
+        return None
+    try:
+        amount_msat = int(amount_to_msat(found_hrp[2:]))
+    except Bolt11AmountInvalidException:
+        return None
+    data = [CHARSET.find(c) for c in data_part]
+    if not _verify_checksum(found_hrp, data):
+        return None
+    decoded = convertbits(data[:-6], 5, 8, False)
+    if decoded is None or len(decoded) != 65:
+        return None
+    return amount_msat, bytes(decoded)
+
+
 # cx1<P || chaincode>: a 64-byte watch-only export of a WALLET's derivation
 # branch for one SERVICE - never appears in a mint interaction itself, only
 # on POST /p/{username}.

@@ -31,7 +31,6 @@ def test_bip173_bech32_vector_is_rejected_as_bech32m():
     [
         (bech32m.encode_cp1, bech32m.decode_cp1, 32),
         (bech32m.encode_ck1, bech32m.decode_ck1, 65),
-        (bech32m.encode_cs1, bech32m.decode_cs1, 65),
         (bech32m.encode_cx1, bech32m.decode_cx1, 64),
     ],
 )
@@ -41,12 +40,28 @@ def test_roundtrip(encode, decode, length):
     assert decode(encoded) == data
 
 
+@pytest.mark.parametrize("amount_msat", [0, 1, 1000, 21000, 5000, 100_000_000])
+def test_cs1_roundtrip_carries_the_amount_in_its_hrp(amount_msat):
+    """cs1, unlike its siblings, folds amount_msat into its own HRP (BOLT-11
+    style) rather than needing it supplied alongside the certificate - see
+    25.md's Encoding."""
+    sig = urandom(65)
+    encoded = bech32m.encode_cs1(amount_msat, sig)
+    assert encoded.startswith("cs")
+    assert bech32m.decode_cs1(encoded) == (amount_msat, sig)
+
+
 def test_encoded_lengths_match_the_spec():
     """25.md's Encoding section states each prefix's exact total length."""
     assert len(bech32m.encode_cp1(urandom(32))) == 61
     assert len(bech32m.encode_ck1(urandom(65))) == 113
-    assert len(bech32m.encode_cs1(urandom(65))) == 113
     assert len(bech32m.encode_cx1(urandom(64))) == 112
+    # cs1's total length is no longer fixed - it grows with the number of
+    # digits its amount needs (its HRP is "cs" + amount + multiplier, see
+    # encode_cs1) - but the example the spec itself gives, "cs10n<...>" for
+    # 1000 msat, is exactly 116 characters: 5-char HRP + 1-char separator +
+    # 104 data symbols + 6-char checksum.
+    assert len(bech32m.encode_cs1(1000, urandom(65))) == 116
 
 
 def test_wrong_length_raises_on_encode():

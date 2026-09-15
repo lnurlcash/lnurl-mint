@@ -1161,7 +1161,7 @@ async def _certificate(
     raw = await sign_note(note_id_hex, amount_msat, funding_source)
     if raw is None:
         return None
-    return bech32m.encode_cs1(bytes.fromhex(raw)) if is_cp1 else raw
+    return bech32m.encode_cs1(amount_msat, bytes.fromhex(raw)) if is_cp1 else raw
 
 
 @router.get("/w", tags=["lnurlcash"])

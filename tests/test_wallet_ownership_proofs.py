@@ -56,9 +56,9 @@ def test_informational_get_includes_cs1_certificate(client: TestClient, node: Fa
     k1 = _ck1(sk)
     data = client.get(f"/w?k1={k1}").json()
     assert "sig" in data
-    sig = bech32m.decode_cs1(data["sig"])
-    assert sig is not None
-    digest = lightning_signed_message_digest(f"LNURLcash:5000:{bech32m.decode_cp1(cp1).hex()}")
+    amount_msat, sig = bech32m.decode_cs1(data["sig"])
+    assert amount_msat == 5000
+    digest = lightning_signed_message_digest(f"LNURLcash:{amount_msat}:{bech32m.decode_cp1(cp1).hex()}")
     recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
     assert recovered.format(compressed=True).hex() == node.pubkey
 
@@ -91,9 +91,9 @@ def test_recovery_scan_via_p_equals_cp1_also_includes_cs1_certificate(client: Te
     sk, cp1 = _mint_cp1_note(client, node, 5000)
     data = client.get(f"/w?p={cp1}").json()
     assert "sig" in data
-    sig = bech32m.decode_cs1(data["sig"])
-    assert sig is not None
-    digest = lightning_signed_message_digest(f"LNURLcash:5000:{bech32m.decode_cp1(cp1).hex()}")
+    amount_msat, sig = bech32m.decode_cs1(data["sig"])
+    assert amount_msat == 5000
+    digest = lightning_signed_message_digest(f"LNURLcash:{amount_msat}:{bech32m.decode_cp1(cp1).hex()}")
     recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
     assert recovered.format(compressed=True).hex() == node.pubkey
 
@@ -114,9 +114,10 @@ def test_rotate_cp1_note_produces_cp1_output_with_certificate(client: TestClient
     new_sk, new_cp1 = _note_keypair()
     data = client.get(f"/w/cb?k1={k1}&p1={new_cp1}").json()
     assert data["status"] == "OK"
-    sig = bech32m.decode_cs1(data["sig"])
+    amount_msat, sig = bech32m.decode_cs1(data["sig"])
+    assert amount_msat == 5000
     new_pk = bech32m.decode_cp1(new_cp1)
-    digest = lightning_signed_message_digest(f"LNURLcash:5000:{new_pk.hex()}")
+    digest = lightning_signed_message_digest(f"LNURLcash:{amount_msat}:{new_pk.hex()}")
     recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
     assert recovered.format(compressed=True).hex() == node.pubkey
 
@@ -133,8 +134,8 @@ def test_split_cp1_note_produces_two_cp1_outputs(client: TestClient, node: FakeN
     change_sk, change_cp1 = _note_keypair()
     data = client.get(f"/w/cb?k1={k1}&amount=2000&p1={out_cp1}&p2={change_cp1}").json()
     assert data["status"] == "OK"
-    assert bech32m.decode_cs1(data["sig"]) is not None
-    assert bech32m.decode_cs1(data["sig2"]) is not None
+    assert bech32m.decode_cs1(data["sig"])[0] == 2000
+    assert bech32m.decode_cs1(data["sig2"])[0] == 3000
 
     out_k1 = _ck1(out_sk)
     change_k1 = _ck1(change_sk)
@@ -150,7 +151,7 @@ def test_merge_mixes_legacy_and_cp1_notes(client: TestClient, node: FakeNode, mi
 
     data = client.get(f"/w/cb?k1={legacy_k1}&k1={ck1}&p1={out_cp1}").json()
     assert data["status"] == "OK"
-    assert bech32m.decode_cs1(data["sig"]) is not None
+    assert bech32m.decode_cs1(data["sig"])[0] == 5000
 
     out_k1 = _ck1(out_sk)
     assert client.get(f"/w?k1={out_k1}").json()["maxWithdrawable"] == 5000
