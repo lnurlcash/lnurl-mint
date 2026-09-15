@@ -82,6 +82,8 @@ encode_cp1, decode_cp1 = _fixed_length_codec("cp", 32)
 # ck1<sig>: a 65-byte recoverable ECDSA signature (r || s || recovery-id) -
 # the bearer secret for a cp1 note, submitted in place of a revealed k1.
 encode_ck1, decode_ck1 = _fixed_length_codec("ck", 65)
+
+
 # cs1<sig>: the same 65-byte shape, produced by SERVICE instead - an
 # issuance certificate, never a spend authorization on its own. Unlike the
 # other three, its HRP is not the fixed 2-char "cs": it carries the
