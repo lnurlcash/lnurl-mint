@@ -79,9 +79,42 @@ def _fixed_length_codec(hrp: str, length: int) -> tuple:
 # cp1<pk>: a 32-byte x-only secp256k1 public key (BIP-340) - a note's public
 # commitment, in place of Part 1's hash-of-preimage.
 encode_cp1, decode_cp1 = _fixed_length_codec("cp", 32)
-# ck1<sig>: a 65-byte recoverable ECDSA signature (r || s || recovery-id) -
-# the bearer secret for a cp1 note, submitted in place of a revealed k1.
-encode_ck1, decode_ck1 = _fixed_length_codec("ck", 65)
+
+
+# ck1<pk><sig>: a 32-byte BIP-340 x-only public key concatenated with a
+# 64-byte Schnorr signature (96 bytes total) - the bearer secret for a cp1
+# note, submitted in place of a revealed k1. `pk` travels alongside the
+# signature explicitly, per 25.md's Encoding (post "actually use schnorr
+# sigs..." - a verifier reads it straight off the value rather than
+# recovering it (see signing.verify_ck1_signature).
+def encode_ck1(pubkey: bytes, signature: bytes) -> str:
+    if len(pubkey) != 32:
+        raise ValueError(f"ck1... pubkey must be 32 bytes, got {len(pubkey)}")
+    if len(signature) != 64:
+        raise ValueError(f"ck1... signature must be 64 bytes, got {len(signature)}")
+    return encode("ck", pubkey + signature)
+
+
+def decode_ck1(s: str) -> tuple[bytes, bytes] | None:
+    """Inverse of encode_ck1: (pk, sig), or None on any malformed input -
+    bad HRP/checksum, or a payload that isn't exactly 96 bytes (32 + 64) -
+    never raises, same contract as decode() above. A 65-byte payload
+    decodes fine as bech32m but fails this length check, falling through
+    to decode_ck1_legacy below."""
+    data = decode("ck", s)
+    return (data[:32], data[32:]) if data is not None and len(data) == 96 else None
+
+
+# TODO(deprecated): the pre-schnorr ck1 shape - a bare 65-byte recoverable
+# ECDSA signature (r || s || recovery-id), no embedded pk, the signer's
+# pubkey recovered via ecrecover instead (see signing.recover_note_pubkey).
+# Kept only so notes minted before the schnorr switch (../luds commit
+# da07aa0) remain redeemable during the transition; remove this, along with
+# signing.recover_note_pubkey and signing._CK1_FIXED_DIGEST, once those have
+# aged out.
+def decode_ck1_legacy(s: str) -> bytes | None:
+    data = decode("ck", s)
+    return data if data is not None and len(data) == 65 else None
 
 
 # cs1<sig>: the same 65-byte shape, produced by SERVICE instead - an

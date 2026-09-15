@@ -18,7 +18,6 @@ from fastapi.testclient import TestClient
 from lnurl_mint import bech32m, derivation
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from lnurl_mint.signing import lightning_signed_message_digest
 from tests.conftest import FakeNode
 
 # secp256k1 group order - needed to mirror derive_pubkey's BIP-340 x-only
@@ -29,7 +28,7 @@ _N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 # wherever a test needs *some* sig value present (sig is a required query
 # param on every register/unregister call now) but wants the ownership
 # check itself to fail, not FastAPI's own missing-parameter validation.
-_BOGUS_SIG = "00" * 65
+_BOGUS_SIG = "00" * 64
 
 
 def _branch() -> tuple[PrivateKey, bytes, bytes, str]:
@@ -52,16 +51,17 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
     private-key side must first negate `p`'s scalar whenever `p`'s own
     full pubkey has odd y (PublicKeyXOnly always represents the even-y
     point), then add the same tweak - this recovers sk_0, the branch's
-    own index-0 secret. Signed over
-    "LNURLcash:<action>:<username>" (25.md's Seed & derivation; a
-    different message than a note's own ck1 - see signing.py),
-    recoverable. `action` is "register" (a fresh claim OR an overwrite -
-    upsert_registered_username checks it against a different branch
-    depending on which) or "unregister" (matching
-    delete_registered_username) - the two are never interchangeable.
-    `username` must already be lowercase: the endpoint lowercases it
-    before ever checking a signature, so a sig signed over a mixed-case
-    username would simply never match."""
+    own index-0 secret. Signed over "LNURLcash:<action>:<username>" (25.md's
+    Seed & derivation; a different message than a note's own ck1 - see
+    signing.py), a plain BIP-340 Schnorr signature (post "actually use
+    schnorr sigs..." - ../luds commit da07aa0), no pk attached since
+    SERVICE derives sk0's public half itself from cx1. `action` is
+    "register" (a fresh claim OR an overwrite - upsert_registered_username
+    checks it against a different branch depending on which) or
+    "unregister" (matching delete_registered_username) - the two are never
+    interchangeable. `username` must already be lowercase: the endpoint
+    lowercases it before ever checking a signature, so a sig signed over a
+    mixed-case username would simply never match."""
     d = p.to_int()
     if p.public_key.format(compressed=True)[0] == 0x03:
         d = _N - d
@@ -69,8 +69,8 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
         derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
     )
     sk0 = PrivateKey.from_int((d + tweak) % _N)
-    digest = lightning_signed_message_digest(f"LNURLcash:{action}:{username}")
-    return sk0.sign_recoverable(digest, hasher=None).hex()
+    message = sha256(f"LNURLcash:{action}:{username}".encode()).digest()
+    return sk0.sign_schnorr(message).hex()
 
 
 def _npub() -> tuple[bytes, str]:

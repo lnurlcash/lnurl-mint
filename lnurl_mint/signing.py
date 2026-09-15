@@ -1,7 +1,7 @@
 import logging
 from hashlib import sha256
 
-from coincurve import PublicKey
+from coincurve import PublicKey, PublicKeyXOnly
 
 from .node import LightningBackendConfig, fetch_node_info, sign_message
 
@@ -127,27 +127,66 @@ def verify_note(pubkey_hex: str, note_id_hex: str, amount_msat: int, signature_h
     return recovered.format(compressed=True).hex() == pubkey_hex
 
 
-# LUD-25 Part 2, Encoding: a `ck1` is a WALLET's signature with a `cp1`
-# note's own sk, over this one fixed message - unlike `cs1` (per-note,
-# amount-and-pubkey-bound, see _message/sign_note), the same `ck1` value is
-# reused everywhere that note's secret is needed, redemption included, so
-# the message it signs can never depend on anything about the note itself.
-# Precomputed once: every ck1 recovery reuses the identical digest.
+# LUD-25 Part 2, Encoding (post "actually use schnorr sigs..." - ../luds
+# commit da07aa0): everything a WALLET itself signs with a note's own key or
+# a branch's index-0 key (ck1, and the registration ownership proof below)
+# is a plain BIP-340 Schnorr signature over a fixed domain string, verified
+# directly against the pubkey it's paired with (ck1) or already on file
+# (registration) - never recovered. libsecp256k1's schnorr verify wants an
+# exact 32-byte message, so the domain string is sha256'd once here purely
+# to fit that width, not for any domain-separation purpose of its own (the
+# distinct strings do that already).
+def _schnorr_message(message: str) -> bytes:
+    return sha256(message.encode()).digest()
+
+
+# A `ck1` is a WALLET's signature with a `cp1` note's own sk, over this one
+# fixed message - unlike `cs1` (per-note, amount-and-pubkey-bound, see
+# _message/sign_note), the same `ck1` value is reused everywhere that
+# note's secret is needed, redemption included, so the message it signs can
+# never depend on anything about the note itself. Precomputed once: every
+# ck1 verification reuses the identical message.
+_CK1_SCHNORR_MESSAGE = _schnorr_message(_DOMAIN_TAG)
+
+
+def verify_ck1_signature(pubkey: bytes, signature: bytes) -> bool:
+    """Whether `signature` is a valid `ck1` Schnorr signature by `pubkey`
+    (32-byte x-only) - router.py's redemption-side check for the current
+    `ck1<pk><sig>` shape (bech32m.decode_ck1). Unlike the deprecated
+    recover_note_pubkey below, `pk` travels with the value itself here;
+    this only confirms the signature actually matches it, nothing is
+    recovered - the pubkey IS the note id to look up, once this returns
+    True. False (never raises) on a malformed pubkey or signature - the
+    same way a malformed legacy k1 fails HEX32_PATTERN, left to the caller
+    to turn into the ordinary "invalid k1" response."""
+    try:
+        return PublicKeyXOnly(pubkey).verify(signature, _CK1_SCHNORR_MESSAGE)
+    except ValueError:
+        return False
+
+
+# TODO(deprecated): the pre-schnorr ck1 shape - a bare 65-byte recoverable
+# ECDSA signature (r || s || recovery-id), no embedded pk, over this same
+# fixed message but digest-wrapped the "Lightning Signed Message" way
+# (unlike the plain schnorr message above). Kept only so notes minted
+# before the schnorr switch remain redeemable during the transition;
+# remove this, along with bech32m.decode_ck1_legacy and _CK1_FIXED_DIGEST,
+# once those have aged out.
 _CK1_FIXED_DIGEST = lightning_signed_message_digest("LNURLcash")
 
 
 def recover_note_pubkey(signature_hex: str) -> bytes:
-    """Recovers the 32-byte x-only public key a `ck1` signature was
-    produced with - router.py's redemption-side counterpart to
-    Wallet-side ownership proofs' `ecrecover(digest, sig) -> pk_i`. Unlike
-    verify_note (which compares a recovered key to one already known),
-    this is a pure recovery: the caller has no prior claim about which
-    note `signature_hex` belongs to, only the raw signature a request
-    supplied as `k1` - the recovered key's x-coordinate IS the note id to
-    look up. Raises ValueError on a malformed signature (wrong length, or
-    one that doesn't recover to a valid point) - the same way a malformed
-    legacy k1 fails HEX32_PATTERN, left to the caller to turn into the
-    ordinary "invalid k1" response."""
+    """Recovers the 32-byte x-only public key a legacy `ck1` signature was
+    produced with - router.py's redemption-side fallback for a `ck1` that
+    doesn't decode as the current `ck1<pk><sig>` shape (see
+    bech32m.decode_ck1_legacy). Unlike verify_ck1_signature (which checks a
+    signature against a pubkey already in hand), this is a pure recovery:
+    the caller has no prior claim about which note `signature_hex` belongs
+    to, only the raw signature a request supplied as `k1` - the recovered
+    key's x-coordinate IS the note id to look up. Raises ValueError on a
+    malformed signature (wrong length, or one that doesn't recover to a
+    valid point) - the same way a malformed legacy k1 fails HEX32_PATTERN,
+    left to the caller to turn into the ordinary "invalid k1" response."""
     signature = bytes.fromhex(signature_hex)
     recovered = PublicKey.from_signature_and_message(signature, _CK1_FIXED_DIGEST, hasher=None)
     return recovered.format(compressed=True)[1:]
@@ -159,7 +198,7 @@ def recover_note_pubkey(signature_hex: str) -> bytes:
 # hand out first, before this ever needed proving), over
 # "LNURLcash:register:<username>" (to overwrite an existing claim) or
 # "LNURLcash:unregister:<username>" (to delete one), per 25.md's Seed &
-# derivation. Domain-separated from a note's own `ck1` (_CK1_FIXED_DIGEST
+# derivation. Domain-separated from a note's own `ck1` (_CK1_SCHNORR_MESSAGE
 # above) so a note's spend/redemption signature can never be replayed
 # here, or vice versa - and binding `action`/`username` into the message
 # itself, rather than one fixed value reused everywhere, stops a
@@ -170,16 +209,22 @@ def _register_message(action: str, username: str) -> str:
     return f"{_DOMAIN_TAG}:{action}:{username}"
 
 
-def recover_register_pubkey(signature_hex: str, action: str, username: str) -> bytes:
-    """Recovers the 32-byte x-only public key a registration ownership-
-    proof signature was produced with - same recoverable-ECDSA primitive
-    as recover_note_pubkey, over _register_message(action, username)'s own
-    digest instead, so it can never be mistaken for a note's own `ck1`,
-    another username's proof, or this same username's other action.
-    `action` is "register" (upsert_registered_username's overwrite path)
-    or "unregister" (delete_registered_username). Raises ValueError on a
-    malformed signature, same as recover_note_pubkey."""
-    signature = bytes.fromhex(signature_hex)
-    digest = lightning_signed_message_digest(_register_message(action, username))
-    recovered = PublicKey.from_signature_and_message(signature, digest, hasher=None)
-    return recovered.format(compressed=True)[1:]
+def verify_register_signature(pubkey: bytes, signature_hex: str, action: str, username: str) -> bool:
+    """Whether `signature_hex` is a valid registration ownership-proof
+    Schnorr signature by `pubkey` (the branch's own index-0 public key,
+    already derived by the caller from the cx1 on file - router._owns_branch)
+    over _register_message(action, username). `action` is "register"
+    (upsert_registered_username's overwrite path) or "unregister"
+    (delete_registered_username). Unlike the note-redemption path, there is
+    no legacy fallback here: SERVICE derives `pubkey` itself from `cx1`
+    rather than trusting one embedded in the request, so nothing about this
+    check's shape needed to change for the schnorr switch beyond the
+    signature itself. False (never raises) on a malformed signature."""
+    try:
+        signature = bytes.fromhex(signature_hex)
+    except ValueError:
+        return False
+    try:
+        return PublicKeyXOnly(pubkey).verify(signature, _schnorr_message(_register_message(action, username)))
+    except ValueError:
+        return False

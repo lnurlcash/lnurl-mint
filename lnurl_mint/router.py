@@ -39,7 +39,7 @@ from .node import (
     pay_invoice,
     payment_preimage,
 )
-from .signing import mint_pubkey, recover_note_pubkey, recover_register_pubkey, sign_note
+from .signing import mint_pubkey, recover_note_pubkey, sign_note, verify_ck1_signature, verify_register_signature
 
 router = APIRouter()
 router.route_class = LnurlErrorResponseHandler
@@ -439,21 +439,33 @@ async def _note_amount_by_id(note_id: str) -> int | None:
 def _note_id_from_k1(k1: str) -> tuple[str, bool] | None:
     """(note id, is a `cp1` note) that `k1` identifies, regardless of shape -
     a legacy hex secret hashes to its id (Part 1's plain bearer notes), a
-    `ck1` recoverable signature recovers to its id directly, no hashing
-    (Part 2's Wallet-side ownership proofs). There is only ever the one
-    `ck1` per note - the same value used both to redeem it and,
-    informationally, to prove authenticity (see 25.md's Encoding) - so this
-    single dispatch covers both router.get_withdraw and
-    router.get_withdraw_callback. None if `k1` is neither shape, or a `ck1`
-    that doesn't recover to a valid point. Doesn't touch the store; see
-    _resolve_note for that."""
+    `ck1<pk><sig>` value names its id directly via its own embedded `pk`,
+    once its Schnorr signature checks out (Part 2's Wallet-side ownership
+    proofs). There is only ever the one `ck1` per note - the same value
+    used both to redeem it and, informationally, to prove authenticity
+    (see 25.md's Encoding) - so this single dispatch covers both
+    router.get_withdraw and router.get_withdraw_callback. None if `k1` is
+    neither shape, or a `ck1` whose signature doesn't verify. Doesn't touch
+    the store; see _resolve_note for that.
+
+    TODO(deprecated): also accepts the pre-schnorr `ck1` shape - a bare
+    65-byte recoverable signature with no embedded pk, recovered via
+    ecrecover instead of verified (bech32m.decode_ck1_legacy,
+    signing.recover_note_pubkey) - so notes minted before the schnorr
+    switch (../luds commit da07aa0) remain redeemable during the
+    transition. Remove this fallback, and the two symbols above, once
+    those have aged out."""
     if HEX32_PATTERN.match(k1):
         return _note_id(k1), False
-    signature = bech32m.decode_ck1(k1)
-    if signature is None:
+    decoded = bech32m.decode_ck1(k1)
+    if decoded is not None:
+        pubkey, signature = decoded
+        return (pubkey.hex(), True) if verify_ck1_signature(pubkey, signature) else None
+    legacy_signature = bech32m.decode_ck1_legacy(k1)
+    if legacy_signature is None:
         return None
     try:
-        return recover_note_pubkey(signature.hex()).hex(), True
+        return recover_note_pubkey(legacy_signature.hex()).hex(), True
     except ValueError:
         return None
 
@@ -665,13 +677,13 @@ def _registrable_username(username: str) -> bool:
 
 
 def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str) -> bool:
-    """Whether `sig_hex` is a valid ownership-proof signature (see
-    signing.recover_register_pubkey) for `branch_hex`'s own index-0
+    """Whether `sig_hex` is a valid ownership-proof Schnorr signature (see
+    signing.verify_register_signature) by `branch_hex`'s own index-0
     public key - "the first secret" a WALLET derives on a branch, the
     same one claim_next_index would hand a note out under first.
     `action` ("register" or "unregister") and `username` are folded into
     the signed message itself, per 25.md - domain separation from a
-    note's own `ck1` (see signing._CK1_FIXED_DIGEST), AND from any other
+    note's own `ck1` (see signing._CK1_SCHNORR_MESSAGE), AND from any other
     username's proof or this same username's other action, so a
     signature captured from one overwrite/delete can never be replayed
     against a different username sharing this branch, or against the
@@ -685,11 +697,7 @@ def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str) -> b
     branch = bytes.fromhex(branch_hex)
     branch_point, chain_code = branch[:32], branch[32:]
     expected = derivation.derive_pubkey(branch_point, chain_code, 0)
-    try:
-        recovered = recover_register_pubkey(sig_hex, action, username)
-    except ValueError:
-        return False
-    return recovered == expected
+    return verify_register_signature(expected, sig_hex, action, username)
 
 
 @router.post("/p/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse)
@@ -704,7 +712,7 @@ def upsert_registered_username(username: str, cx1: str, sig: str, npub: str | No
     Always proven, never proof-free - even for a fresh, unclaimed
     `username`: `sig` (see _owns_branch) is a required ownership-proof
     signature over "LNURLcash:register:<username>"
-    (signing.recover_register_pubkey), so it can never be confused with a
+    (signing.verify_register_signature), so it can never be confused with a
     note's own `ck1`, another username's proof, or this same username's
     unregister proof. What it must prove differs by case, though:
     - A fresh claim proves the caller actually controls the `cx1` being
