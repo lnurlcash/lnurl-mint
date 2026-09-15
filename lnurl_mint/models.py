@@ -13,9 +13,12 @@ class LnurlPayResponse(BaseModel):
     hex-encoded 32-byte hash, to close the preimage-propagation race a
     minted note's k1 would otherwise be exposed to (see
     router.get_pay_callback) - 64 hex chars, exactly what's advertised
-    here. `comment` is mandatory
-    here (missing or malformed rejects the mint outright), unlike LUD-12's
-    own optional/free-text default use.
+    here. `comment` is mandatory on the fixed identity's callback, which
+    has no other key to mint under (missing or malformed rejects the mint
+    outright), unlike LUD-12's own optional/free-text default use. On a
+    Part 2 cx1-registered username it is not: that address has a branch to
+    mint on, so a comment naming no output is the free text
+    `commentAllowed` invites and is ignored rather than refused.
 
     `allowsNostr`/`nostrPubkey` (NIP-57) are present only on a registered
     username's payRequest of a mint with NOSTR_KEY set: the callback then

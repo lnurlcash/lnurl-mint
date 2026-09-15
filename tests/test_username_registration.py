@@ -471,6 +471,21 @@ def test_ordinary_lud12_comment_automints_for_registered_username(client: TestCl
     assert _note_value(client, expected_id) == 5000
 
 
+def test_empty_lud12_comment_automints_for_registered_username(client: TestClient, node: FakeNode):
+    """Wallets commonly send `comment=` when the payer leaves the optional
+    comment box empty. It must behave like an omitted comment."""
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "mabel")
+    client.post(f"/p/mabel?cx1={cx1}&sig={sig}")
+
+    pay_response = client.get("/p/mabel", params={"amount": 5000, "comment": ""})
+    assert pay_response.json().get("pr"), pay_response.text
+    node.settled.add(_payment_hash(node))
+
+    expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
+    assert _note_value(client, expected_id) == 5000
+
+
 def test_username_registration_disabled_404s_register(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "username_registration_enabled", False)
     _, _, _, cx1 = _branch()

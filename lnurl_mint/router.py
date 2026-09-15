@@ -983,11 +983,12 @@ async def _pay_callback(
     invoice would otherwise win by learning the preimage itself. `comment`
     is exactly that shape (or,
     per Part 2's Wallet-side ownership proofs, `cp1<pk>` - see
-    _decode_note_ref); a malformed one is rejected outright rather than
-    falling back to a preimage-keyed note, since a preimage-keyed note is
-    only as safe as the paying node's honesty about forwarding it: a
-    WALLET or route hop could otherwise observe the preimage before
-    settlement completes and steal the note.
+    _decode_note_ref); one of any other shape never falls back to a
+    preimage-keyed note, since a preimage-keyed note is only as safe as
+    the paying node's honesty about forwarding it: a WALLET or route hop
+    could otherwise observe the preimage before settlement completes and
+    steal the note. Without a registered branch there is no other key to
+    mint under, so a comment of any other shape is rejected outright.
 
     `comment` is REQUIRED for the fixed identity (`branch` is None), same
     as ever - but for a registered username it becomes OPTIONAL: when
@@ -995,9 +996,9 @@ async def _pay_callback(
     own registered branch itself (NoteStore.claim_next_index) and credits
     the note under it, exactly as if the payer's WALLET had supplied that
     same `comment=cp1<pk>` in person (25.md's Seed & derivation) - no
-    WALLET involvement needed at receive time at all. A comment is still
-    honored if the payer's WALLET supplies one anyway (e.g. the address
-    owner minting for themselves with a specific key already in hand).
+    WALLET involvement needed at receive time at all. A comment that names
+    an output is still honored; one that does not is the free text
+    `commentAllowed` asks for, and the branch key is used instead.
 
     `verify` (LUD-21, only advertised if VERIFY_ENABLED) lets a wallet with
     no node of its own poll settlement status - see verify_invoice. Safe to
