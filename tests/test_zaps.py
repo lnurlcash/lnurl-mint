@@ -1,7 +1,7 @@
 """NIP-57 zaps, publish-only (see nostr.py): a registered username's
-payRequest says it can be zapped, /p/cb takes the kind 9734 and binds the
-invoice to it, and once the invoice settles the mint publishes a kind
-9735 receipt signed with its own Nostr key."""
+payRequest says it can be zapped, /p/{username} takes the kind 9734 and
+binds the invoice to it, and once the invoice settles the mint publishes
+a kind 9735 receipt signed with its own Nostr key."""
 
 import asyncio
 import json
@@ -63,7 +63,7 @@ def zaps(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> list[tuple[list
 def _register(client: TestClient) -> str:
     """A fresh username each time: the store outlives one test."""
     username = f"zap{urandom(4).hex()}"
-    assert client.get(f"/register?username={username}&cx1={_branch()}").json() == {"status": "OK"}
+    assert client.post(f"/p/{username}?cx1={_branch()}").json() == {"status": "OK"}
     return username
 
 
@@ -95,7 +95,7 @@ def test_the_fixed_identity_does_not(client: TestClient, zaps):
 def test_without_a_key_nothing_is_advertised_and_a_zap_is_refused(client: TestClient):
     username = _register(client)
     assert "allowsNostr" not in client.get(f"/.well-known/lnurlp/{username}").json()
-    resp = client.get("/p/cb", params={"amount": 21_000, "username": username, "nostr": json.dumps(_zap_request())})
+    resp = client.get(f"/p/{username}", params={"amount": 21_000, "nostr": json.dumps(_zap_request())})
     assert resp.json() == {"status": "ERROR", "reason": "Zaps are not offered for this address."}
 
 
@@ -103,7 +103,7 @@ def test_a_zap_binds_the_invoice_to_the_request_and_publishes_a_receipt(client: 
     username = _register(client)
     request = _zap_request()
     raw = json.dumps(request)
-    resp = client.get("/p/cb", params={"amount": 21_000, "username": username, "nostr": raw}).json()
+    resp = client.get(f"/p/{username}", params={"amount": 21_000, "nostr": raw}).json()
     assert "pr" in resp, resp
     payment_hash = sha256(node.last_preimage).hexdigest()
     # the invoice carries sha256(zap request), which is what clients check the receipt against
@@ -135,9 +135,7 @@ def test_a_zap_binds_the_invoice_to_the_request_and_publishes_a_receipt(client: 
 
 def test_a_receipt_no_relay_takes_is_retried(client: TestClient, node: FakeNode, zaps, monkeypatch):
     username = _register(client)
-    pr = client.get(
-        "/p/cb", params={"amount": 21_000, "username": username, "nostr": json.dumps(_zap_request())}
-    ).json()["pr"]
+    pr = client.get(f"/p/{username}", params={"amount": 21_000, "nostr": json.dumps(_zap_request())}).json()["pr"]
     payment_hash = sha256(node.last_preimage).hexdigest()
     node.settled.add(payment_hash)
 
@@ -161,7 +159,7 @@ def test_a_receipt_no_relay_takes_is_retried(client: TestClient, node: FakeNode,
 def test_an_ordinary_address_payment_publishes_nothing(client: TestClient, node: FakeNode, zaps, monkeypatch):
     monkeypatch.setattr(settings, "verify_enabled", True)
     username = _register(client)
-    pr = client.get("/p/cb", params={"amount": 21_000, "username": username}).json()["pr"]
+    pr = client.get(f"/p/{username}", params={"amount": 21_000}).json()["pr"]
     payment_hash = sha256(node.last_preimage).hexdigest()
     node.settled.add(payment_hash)
     # not a zap, so the poll leaves it to settle lazily as ever; verify settles it here
@@ -191,7 +189,7 @@ def test_a_bad_zap_request_is_refused_before_any_invoice(
     client: TestClient, node: FakeNode, zaps, request_json: str, reason: str
 ):
     username = _register(client)
-    resp = client.get("/p/cb", params={"amount": 21_000, "username": username, "nostr": request_json})
+    resp = client.get(f"/p/{username}", params={"amount": 21_000, "nostr": request_json})
     assert resp.json() == {"status": "ERROR", "reason": reason}
     assert node.last_preimage == b""
 
@@ -200,7 +198,7 @@ def test_a_zap_request_without_relays_is_refused(client: TestClient, zaps):
     username = _register(client)
     request = _zap_request()
     request["tags"] = [t for t in request["tags"] if t[0] != "relays"]
-    resp = client.get("/p/cb", params={"amount": 21_000, "username": username, "nostr": json.dumps(request)})
+    resp = client.get(f"/p/{username}", params={"amount": 21_000, "nostr": json.dumps(request)})
     # re-signed by nobody: the id no longer matches, which is the first thing checked
     assert resp.json()["status"] == "ERROR"
 
@@ -226,7 +224,7 @@ def test_the_request_cannot_point_the_mint_at_arbitrary_sockets():
 def test_the_settlement_poll_is_bounded(client: TestClient, node: FakeNode, zaps, monkeypatch):
     username = _register(client)
     for _ in range(3):
-        client.get("/p/cb", params={"amount": 21_000, "username": username, "nostr": json.dumps(_zap_request())})
+        client.get(f"/p/{username}", params={"amount": 21_000, "nostr": json.dumps(_zap_request())})
     monkeypatch.setattr(router_module, "_ZAP_POLL_LIMIT", 2)
     assert len(notes.pending_zap_mints(0, router_module._ZAP_POLL_LIMIT)) == 2
     # an invoice older than the window is not polled, however new the rest are

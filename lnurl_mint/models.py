@@ -178,10 +178,25 @@ class WithdrawSuccessResponse(BaseModel):
 
 
 class RegisterUsernameResponse(BaseModel):
-    """LUD-25 Part 2's cx1 registration (router's /register) - claims
-    `username` for a WALLET's watch-only branch, first-come-first-served,
-    no proof of possession (see NoteStore.register_username). A bare
+    """LUD-25 Part 2's cx1 registration (router's POST/DELETE
+    /p/{username}) - claims or frees `username` for/from a WALLET's
+    watch-only branch. A fresh claim is first-come-first-served, no proof
+    of possession; overwriting or deleting an existing one needs an
+    ownership-proof signature instead (see
+    router.upsert_registered_username, NoteStore.upsert_username). A bare
     success marker; the error case is the ordinary
     {"status": "ERROR", "reason": ...} every other endpoint here uses."""
 
     status: Literal["OK"] = "OK"
+
+
+class Nip05Response(BaseModel):
+    """NIP-05's `.well-known/nostr.json` shape (router.get_nip05): a
+    registered username that also supplied an npub at POST /p/{username}
+    resolves here as a Nostr identifier (`name@host`), same as any other
+    NIP-05 server. `names` maps back only the one name that was actually
+    queried - and only if it has an npub on file - never this mint's
+    whole directory; an unregistered or npub-less name just comes back
+    empty, NIP-05's own "not found", not a 404."""
+
+    names: dict[str, str]

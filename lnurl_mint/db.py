@@ -38,7 +38,7 @@ class NoteStore:
     per the spec, if any k1 in a multi-k1 request is invalid the whole
     request fails and no note may be burned or minted.
 
-    Also holds `usernames` (register_username/username_branch/
+    Also holds `usernames` (upsert_username/username_branch/
     claim_next_index): LUD-25 Part 2's cx1 registration, letting a WALLET
     claim a Lightning Address that auto-mints `cp1` notes off its own
     branch. This is the one piece of durable per-caller state this mint
@@ -136,6 +136,12 @@ class NoteStore:
             self._add_column_if_missing(self._conn, "mints", "zap_request", "TEXT")
             self._add_column_if_missing(self._conn, "mints", "zap_receipt", "TEXT")
             self._add_column_if_missing(self._conn, "mints", "created_at", "INTEGER NOT NULL DEFAULT 0")
+            # NIP-05 (see upsert_username/nostr_pubkey): an optional npub
+            # a WALLET supplied alongside cx1, hex-decoded. NULL for a
+            # username registered before this existed, or that never
+            # supplied one - both mean "not a NIP-05 name", same as any
+            # other unregistered name (see router.get_nip05)
+            self._add_column_if_missing(self._conn, "usernames", "nostr_pubkey", "TEXT")
             self._conn.commit()
         return self._conn
 
@@ -524,23 +530,54 @@ class NoteStore:
                 grouped.setdefault(payment_hash, []).append(note_id)
         return grouped
 
-    def register_username(self, username: str, cx1_hex: str) -> None:
+    def upsert_username(self, username: str, cx1_hex: str, nostr_pubkey_hex: str | None = None) -> None:
         """Claims `username` for the watch-only branch `cx1_hex` (LUD-25
-        Part 2's cx1 = hex(P || chain_code)) - first-come-first-served, no
-        proof the caller controls the branch's private key: `cx1` alone
-        never grants spending (see router.py's /register), so a squatted
-        registration only costs the real owner a name, never funds. Raises
-        ValueError if `username` is already claimed."""
+        Part 2's cx1 = hex(P || chain_code)), or wholesale replaces an
+        existing claim's branch/npub with this call's own (see router.py's
+        POST /p/{username}) - a fresh claim is first-come-first-served, no
+        proof the caller actually controls the branch's private key
+        needed (`cx1` alone never grants spending, so a squatted
+        registration only costs the real owner a name, never funds);
+        router.py gates the OVERWRITE case behind its own ownership-proof
+        signature before ever calling this, since this method itself has
+        no way to tell a fresh claim from a hijack. `next_index` always
+        resets to 0 - an overwrite means a different branch, whose own
+        index 0 was never tried yet.
+
+        `nostr_pubkey_hex`, if given, doubles `username` as a NIP-05 name
+        (see nostr_pubkey/router.get_nip05) - a WALLET-supplied npub,
+        decoded, orthogonal to cx1 (a username can carry one, the other,
+        both, or neither). Omitting it on an overwrite clears any
+        previously registered one, same replace-wholesale semantics as
+        cx1 itself."""
         with self._lock, self.conn:
-            try:
-                self.conn.execute("INSERT INTO usernames (username, cx1) VALUES (?, ?)", (username, cx1_hex))
-            except sqlite3.IntegrityError:
-                raise ValueError("Username already registered.")
+            self.conn.execute(
+                "INSERT INTO usernames (username, cx1, nostr_pubkey, next_index) VALUES (?, ?, ?, 0)"
+                " ON CONFLICT(username) DO UPDATE SET cx1 = excluded.cx1, nostr_pubkey = excluded.nostr_pubkey,"
+                " next_index = 0",
+                (username, cx1_hex, nostr_pubkey_hex),
+            )
+
+    def delete_username(self, username: str) -> None:
+        """Frees `username` entirely - it goes back to being unclaimed,
+        first-come-first-served for anyone (see router.py's DELETE
+        /p/{username}, which gates this behind the same ownership-proof
+        signature the overwrite path uses). A no-op if it was never
+        claimed."""
+        with self._lock, self.conn:
+            self.conn.execute("DELETE FROM usernames WHERE username = ?", (username,))
 
     def username_branch(self, username: str) -> str | None:
         """The cx1 hex (P || chain_code) registered under `username`, or
-        None if it was never claimed (see register_username)."""
+        None if it was never claimed (see upsert_username)."""
         row = self.conn.execute("SELECT cx1 FROM usernames WHERE username = ?", (username,)).fetchone()
+        return row[0] if row else None
+
+    def nostr_pubkey(self, username: str) -> str | None:
+        """The hex Nostr pubkey `username` registered (see
+        upsert_username), or None if it was never claimed, or was claimed
+        with no npub - both are "not a NIP-05 name" to router.get_nip05."""
+        row = self.conn.execute("SELECT nostr_pubkey FROM usernames WHERE username = ?", (username,)).fetchone()
         return row[0] if row else None
 
     def claim_next_index(self, username: str, derive: Callable[[int], str]) -> tuple[str, int]:

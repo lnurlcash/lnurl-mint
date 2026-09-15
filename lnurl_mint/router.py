@@ -24,6 +24,7 @@ from .models import (
     LnurlPayResponse,
     LnurlPayVerifyResponse,
     LnurlWithdrawResponse,
+    Nip05Response,
     RegisterUsernameResponse,
     WithdrawSuccessResponse,
 )
@@ -37,7 +38,7 @@ from .node import (
     pay_invoice,
     payment_preimage,
 )
-from .signing import mint_pubkey, recover_note_pubkey, sign_note
+from .signing import mint_pubkey, recover_note_pubkey, recover_register_pubkey, sign_note
 
 router = APIRouter()
 router.route_class = LnurlErrorResponseHandler
@@ -627,10 +628,11 @@ def _known_username(username: str) -> bool:
     return normalized == settings.username.lower() or normalized == "_"
 
 
-# a registrable username (router.register_username): lowercase-only, so a
-# stored username is always already normalized (see register_username,
-# which lowercases before ever calling this or NoteStore.register_username)
-# and every lookup site can just lowercase its own input to match - short
+# a registrable username (router.upsert_registered_username): lowercase-
+# only, so a stored username is always already normalized (see that
+# function, which lowercases before ever calling this or
+# NoteStore.upsert_username) and every lookup site can just lowercase its
+# own input to match - short
 # enough to stay a reasonable Lightning Address local-part. Deliberately
 # excludes anything HEX32_PATTERN/bech32m would also match - no registered
 # username can ever be confused for a k1/comment/p1 value on another
@@ -643,7 +645,8 @@ def _registered_username_branch(username: str) -> str | None:
     or None if there is none - or unconditionally None while
     username_registration_enabled is off, the same full-endpoint-off
     convention verify_enabled uses: turning it off reverts this mint to a
-    single fixed identity everywhere, not just at /register itself.
+    single fixed identity everywhere, not just at POST/DELETE /p/{username}
+    itself.
     Case-insensitive (see _known_username) - `username` is lowercased here
     before the lookup, matching how it was stored at registration time."""
     if not settings.username_registration_enabled:
@@ -653,30 +656,76 @@ def _registered_username_branch(username: str) -> str | None:
 
 def _registrable_username(username: str) -> bool:
     """Whether `username` (already lowercased by the caller - see
-    register_username) is syntactically valid AND not one of this mint's
-    own reserved identities (settings.username, the bare-domain `_` - see
-    _known_username) - a registered username never shadows this mint's own
-    fixed identity."""
+    upsert_registered_username) is syntactically valid AND not one of
+    this mint's own reserved identities (settings.username, the
+    bare-domain `_` - see _known_username) - a registered username never
+    shadows this mint's own fixed identity."""
     return bool(_USERNAME_PATTERN.match(username)) and not _known_username(username)
 
 
-@router.get("/register", tags=["lnurlcash"])
-def register_username(username: str, cx1: str) -> RegisterUsernameResponse:
+def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str | None) -> bool:
+    """Whether `sig_hex` is a valid ownership-proof signature (see
+    signing.recover_register_pubkey) for `branch_hex`'s own index-0
+    public key - "the first secret" a WALLET derives on a branch, the
+    same one claim_next_index would hand a note out under first.
+    `action` ("register" or "unregister") and `username` are folded into
+    the signed message itself, per 25.md - domain separation from a
+    note's own `ck1` (see signing._CK1_FIXED_DIGEST), AND from any other
+    username's proof or this same username's other action, so a
+    signature captured from one overwrite/delete can never be replayed
+    against a different username sharing this branch, or against the
+    other action for this same one. Gates upsert_registered_username's
+    overwrite path and delete_registered_username outright - never a
+    fresh, unclaimed registration, which stays proof-free (see those
+    functions' own docstrings)."""
+    if sig_hex is None:
+        return False
+    branch = bytes.fromhex(branch_hex)
+    branch_point, chain_code = branch[:32], branch[32:]
+    expected = derivation.derive_pubkey(branch_point, chain_code, 0)
+    try:
+        recovered = recover_register_pubkey(sig_hex, action, username)
+    except ValueError:
+        return False
+    return recovered == expected
+
+
+@router.post("/p/{username}", tags=["lnurlcash"])
+def upsert_registered_username(
+    username: str, cx1: str, npub: str | None = None, sig: str | None = None
+) -> RegisterUsernameResponse:
     """LUD-25 Part 2, Seed & derivation's cx1 registration: claims
     `username` for a WALLET's watch-only branch export (`cx1<P || chain
     code>`), so paying `.well-known/lnurlp/{username}` with no comment
     auto-mints a fresh `cp1` note directly on that branch for every payment
-    received (see get_pay_callback, NoteStore.claim_next_index) - no
-    per-payment WALLET involvement needed. First-come-first-served, no
-    proof the caller actually controls the branch's private key: `cx1`
-    alone never grants spending (only a note's own `sk_i` does - see
-    25.md's Encoding and Wallet-side ownership proofs), so a squatted
-    registration only costs the real owner a name, never funds.
+    received (see get_pay_callback_for_username, NoteStore.claim_next_index)
+    - no per-payment WALLET involvement needed.
+
+    A fresh, unclaimed `username` is first-come-first-served, no proof the
+    caller actually controls the branch's private key: `cx1` alone never
+    grants spending (only a note's own `sk_i` does - see 25.md's Encoding
+    and Wallet-side ownership proofs), so a squatted registration only
+    costs the real owner a name, never funds. Calling this again on an
+    ALREADY-registered `username` instead overwrites it wholesale (new
+    `cx1`, new or absent `npub`) - and that path does need proof: `sig`,
+    an ownership-proof signature (see _owns_branch) made with the
+    CURRENTLY registered branch's own index-0 secret key, over
+    "LNURLcash:register:<username>" (signing.recover_register_pubkey) so
+    it can never be confused with a note's own `ck1`, another username's
+    proof, or this same username's unregister proof. It proves continued
+    control of what's on file already, not of the new `cx1` being switched
+    to - a WALLET migrating to a new seed still holds its old one long
+    enough to sign this once.
 
     `username` is lowercased before validation and storage - a registered
     username is always case-insensitive (see _known_username), so this is
     the one place that normalization actually has to happen; every lookup
-    site just lowercases its own input to match."""
+    site just lowercases its own input to match.
+
+    `npub`, if given, is this same `username` doubling as a NIP-05 name
+    (see get_nip05): decoded and stored alongside cx1. Omitted on an
+    overwrite, any previously registered npub is cleared - this call
+    replaces the registration wholesale, it does not merge into it."""
     if not settings.username_registration_enabled:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
     username = username.lower()
@@ -685,11 +734,63 @@ def register_username(username: str, cx1: str) -> RegisterUsernameResponse:
     branch = bech32m.decode_cx1(cx1)
     if branch is None:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid cx1.")
-    try:
-        notes.register_username(username, branch.hex())
-    except ValueError as exc:
-        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
+    nostr_pubkey_hex: str | None = None
+    if npub is not None:
+        decoded_npub = bech32m.decode_npub(npub)
+        if decoded_npub is None:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid npub.")
+        nostr_pubkey_hex = decoded_npub.hex()
+    existing_branch_hex = notes.username_branch(username)
+    if existing_branch_hex is not None and not _owns_branch("register", username, existing_branch_hex, sig):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Ownership proof required to overwrite an existing registration.")
+    notes.upsert_username(username, branch.hex(), nostr_pubkey_hex)
     return RegisterUsernameResponse()
+
+
+@router.delete("/p/{username}", tags=["lnurlcash"])
+def delete_registered_username(username: str, sig: str) -> RegisterUsernameResponse:
+    """Frees `username` entirely (NoteStore.delete_username) - it goes back
+    to being unclaimed, first-come-first-served for anyone, same as it was
+    never registered. `sig`, an ownership-proof signature over
+    "LNURLcash:unregister:<username>" (see _owns_branch) - a different
+    message than upsert_registered_username's own overwrite proof, so one
+    can never be replayed as the other - is mandatory here too: there is
+    no proof-free case for deleting an address someone else may depend
+    on."""
+    if not settings.username_registration_enabled:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
+    username = username.lower()
+    existing_branch_hex = notes.username_branch(username)
+    if existing_branch_hex is None:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
+    if not _owns_branch("unregister", username, existing_branch_hex, sig):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid ownership signature.")
+    notes.delete_username(username)
+    return RegisterUsernameResponse()
+
+
+@router.get("/.well-known/nostr.json", tags=["lnurlcash"])
+def get_nip05(name: str | None = None) -> Nip05Response:
+    """NIP-05: a registered username that supplied an npub at POST
+    /p/{username} (see upsert_registered_username, NoteStore.nostr_pubkey)
+    resolves here as a
+    Nostr identifier too, `name@host` naming the same npub a client would
+    find on a kind 0 profile's own `nostr` field. Only ever answers the
+    one `name` actually asked about - never this mint's whole directory,
+    even when `name` is omitted - and echoes it back verbatim as the map's
+    key (not lowercased) since a verifying client indexes the response by
+    the exact local-part string it queried with, same convention
+    get_lnaddress's text/identifier follows. An unregistered name, one
+    that never supplied an npub, or no `name` at all all come back as an
+    empty map - NIP-05's own "not found", not a 404. Disabled outright
+    while username_registration_enabled is off, the same
+    revert-to-fixed-identity convention _registered_username_branch
+    follows - a name registered before it was turned off does not leak
+    through here either."""
+    pubkey_hex = (
+        notes.nostr_pubkey(name.lower()) if name is not None and settings.username_registration_enabled else None
+    )
+    return Nip05Response(names={name: pubkey_hex} if pubkey_hex is not None else {})
 
 
 @router.get("/.well-known/lnurlp/{username}", tags=["lnurlcash"])
@@ -703,10 +804,13 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     _known_username) - this well-known alias is this mint's own fixed
     identity's payRequest entry point.
 
-    Also answers for any `username` registered via /register (LUD-25 Part
-    2's cx1 auto-mint - see get_pay_callback): the callback there carries
-    an extra `?username=` so /p/cb knows which registered branch to derive
-    into. Unregistered, unrecognized names still 404."""
+    Also answers for any `username` registered via POST /p/{username}
+    (LUD-25 Part 2's cx1 auto-mint - see get_pay_callback_for_username):
+    such a username's own callback is `/p/{username}` itself, a distinct
+    path rather than a query parameter on the fixed identity's `/p/cb` -
+    so get_pay_callback_for_username knows which registered branch to
+    derive into straight from the URL, no extra parameter needed.
+    Unregistered, unrecognized names still 404."""
     registered = _known_username(username) or _registered_username_branch(username) is not None
     if not registered:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
@@ -724,11 +828,12 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
         # it's only added when there's actually a fee to disclose
         metadata_entries.append(["text/plain", f"Mint fees: {settings.base_fee_msat},{settings.fee_percent_ppm}"])
     metadata = json.dumps(metadata_entries)
-    # a registered (non-fixed-identity) username's callback carries its own
-    # name, so get_pay_callback knows which branch to auto-derive into if
-    # the payer's WALLET doesn't supply its own comment - see that
-    # function's own docstring
-    callback = f"{base}/p/cb" if _known_username(username) else f"{base}/p/cb?username={username}"
+    # a registered (non-fixed-identity) username's callback is its own
+    # path, /p/{username} (get_pay_callback_for_username), rather than a
+    # query parameter tacked onto the fixed identity's /p/cb - so which
+    # branch to auto-derive into if the payer's WALLET doesn't supply its
+    # own comment is already in the URL, no extra parameter needed
+    callback = f"{base}/p/cb" if _known_username(username) else f"{base}/p/{username}"
     # NIP-57: a registered username can be zapped - the note lands on its
     # own branch with no comment needed, and the receipt is what tells the
     # zapper it landed. The fixed identity has no branch to land on.
@@ -802,7 +907,7 @@ async def get_mint_address(req: Request, username: str) -> LnurlMintAddressRespo
     the amount bounds a note can fall into, and `payLink` back to the
     payRequest side), never a functional way to withdraw this mint's own
     funds. Also answers for the reserved bare-domain `_` username and any
-    username registered via /register, same as get_lnaddress (see
+    username registered via POST /p/{username}, same as get_lnaddress (see
     _known_username). `payLink` canonicalizes `_`/settings.username to
     settings.username either way - both name the same fixed identity, not
     two different ones to advertise - but echoes back a genuinely
@@ -814,18 +919,23 @@ async def get_mint_address(req: Request, username: str) -> LnurlMintAddressRespo
     raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
 
 
-@router.get("/p/cb", tags=["lnurlcash"])
-async def get_pay_callback(
+async def _pay_callback(
     req: Request,
     amount: int,
-    comment: str | None = None,
-    username: str | None = None,
-    nostr: str | None = None,
+    comment: str | None,
+    nostr: str | None,
+    username: str | None,
+    branch: bytes | None,
 ) -> LnurlPayActionResponse:
     """LUD-06 callback: returns an invoice for `amount` msat whose preimage
     this mint generated itself (see node.create_invoice) - once the invoice
     settles, that preimage is an outstanding bearer note worth `amount`
-    minus the advertised mint fee, if any (see _mint_fee_msat).
+    minus the advertised mint fee, if any (see _mint_fee_msat). Shared by
+    get_pay_callback (this mint's own fixed identity, `username`/`branch`
+    both None) and get_pay_callback_for_username (a Part 2 cx1-registered
+    Lightning Address, `branch` its own derivation branch, already
+    resolved and lowercased by the caller - see that function's own
+    docstring for why the split exists).
 
     `comment` (LUD-12) is LUD-25's comment protection (Protecting a freshly
     minted note from a preimage race): a WALLET sends a bare hex-encoded
@@ -841,18 +951,15 @@ async def get_pay_callback(
     WALLET or route hop could otherwise observe the preimage before
     settlement completes and steal the note.
 
-    `username` (get_lnaddress's own callback, never a payer's choice - see
-    that function) identifies a Part 2 cx1-registered Lightning Address
-    this payment is minting for; None for this mint's own fixed identity.
-    `comment` is REQUIRED for the fixed identity, same as ever - but for a
-    registered username it becomes OPTIONAL: when omitted, this mint
-    derives the next unused note key on that username's own registered
-    branch itself (NoteStore.claim_next_index) and credits the note under
-    it, exactly as if the payer's WALLET had supplied that same
-    `comment=cp1<pk>` in person (25.md's Seed & derivation) - no WALLET
-    involvement needed at receive time at all. A comment is still honored
-    if the payer's WALLET supplies one anyway (e.g. the address owner
-    minting for themselves with a specific key already in hand).
+    `comment` is REQUIRED for the fixed identity (`branch` is None), same
+    as ever - but for a registered username it becomes OPTIONAL: when
+    omitted, this mint derives the next unused note key on that username's
+    own registered branch itself (NoteStore.claim_next_index) and credits
+    the note under it, exactly as if the payer's WALLET had supplied that
+    same `comment=cp1<pk>` in person (25.md's Seed & derivation) - no
+    WALLET involvement needed at receive time at all. A comment is still
+    honored if the payer's WALLET supplies one anyway (e.g. the address
+    owner minting for themselves with a specific key already in hand).
 
     `verify` (LUD-21, only advertised if VERIFY_ENABLED) lets a wallet with
     no node of its own poll settlement status - see verify_invoice. Safe to
@@ -877,19 +984,6 @@ async def get_pay_callback(
         raise HTTPException(
             HTTPStatus.BAD_REQUEST, f"Amount too low to mint a note (min {settings.min_mint_msat} msat net of fees)."
         )
-
-    branch: bytes | None = None
-    if username is not None and not _known_username(username):
-        # normalized once, here, and reused below for claim_next_index -
-        # that lookup has to use the exact same lowercased key
-        # _registered_username_branch just matched, or it would raise
-        # "Unknown username." against the very branch this call just found
-        # (see NoteStore.register_username, which always stores lowercase)
-        username = username.lower()
-        branch_hex = _registered_username_branch(username)
-        if branch_hex is None:
-            raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
-        branch = bytes.fromhex(branch_hex)
 
     zap_request: str | None = None
     if nostr is not None:
@@ -950,6 +1044,40 @@ async def get_pay_callback(
     base = settings.public_base_url(str(req.base_url))
     verify = f"{base}/verify/{payment_hash}" if settings.verify_enabled else None
     return LnurlPayActionResponse(pr=pr, verify=verify)
+
+
+@router.get("/p/cb", tags=["lnurlcash"])
+async def get_pay_callback(
+    req: Request, amount: int, comment: str | None = None, nostr: str | None = None
+) -> LnurlPayActionResponse:
+    """LUD-06 callback for this mint's own fixed identity
+    (settings.username/the bare-domain `_` - see get_lnaddress). No
+    `username` in the path here: this is the one payRequest entry point
+    that was never a registered address to begin with, so there is
+    nothing for get_pay_callback_for_username's path parameter to name.
+    See _pay_callback for the shared logic (comment protection, LUD-21
+    verify, NIP-57 zaps - always refused here, since zaps need a branch
+    for the note to land on, see _zaps_offered)."""
+    return await _pay_callback(req, amount, comment, nostr, username=None, branch=None)
+
+
+@router.get("/p/{username}", tags=["lnurlcash"])
+async def get_pay_callback_for_username(
+    req: Request, username: str, amount: int, comment: str | None = None, nostr: str | None = None
+) -> LnurlPayActionResponse:
+    """LUD-06 callback for a Part 2 cx1-registered Lightning Address
+    (get_lnaddress's own callback for a registered `username`, never a
+    payer's choice to redirect elsewhere - a request naming a `username`
+    nobody registered 404s here exactly like an unknown one anywhere
+    else). Declared after GET /p/cb above so an exact match on that
+    literal path is always tried first - Starlette resolves routes in
+    registration order, and `{username}` would otherwise happily capture
+    the literal string "cb" too. See _pay_callback for the shared logic."""
+    username = username.lower()
+    branch_hex = _registered_username_branch(username)
+    if branch_hex is None:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
+    return await _pay_callback(req, amount, comment, nostr, username=username, branch=bytes.fromhex(branch_hex))
 
 
 async def _verify_response(

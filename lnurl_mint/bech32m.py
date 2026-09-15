@@ -1,4 +1,4 @@
-from bech32 import CHARSET, bech32_hrp_expand, bech32_polymod, convertbits
+from bech32 import CHARSET, bech32_decode, bech32_hrp_expand, bech32_polymod, convertbits
 
 # LUD-25 Part 2 Encoding: cp1/ck1/cs1/cx1 are BIP-350 bech32m (not classic
 # bech32 - that's LUD-01's `lnurl_encode` in frontend.py, a different
@@ -85,5 +85,22 @@ encode_ck1, decode_ck1 = _fixed_length_codec("ck", 65)
 encode_cs1, decode_cs1 = _fixed_length_codec("cs", 65)
 # cx1<P || chaincode>: a 64-byte watch-only export of a WALLET's derivation
 # branch for one SERVICE - never appears in a mint interaction itself, only
-# on /register.
+# on POST /p/{username}.
 encode_cx1, decode_cx1 = _fixed_length_codec("cx", 64)
+
+
+def decode_npub(s: str) -> bytes | None:
+    """Inverse of NIP-19's npub encoding: classic bech32 (BIP-173, not
+    bech32m - Nostr predates BIP-350's checksum), hrp "npub", a 32-byte
+    x-only pubkey payload. None on any malformed input - wrong hrp, wrong
+    checksum, non-charset characters, mixed case, or a non-32-byte payload
+    - never raises, same contract as decode() above. Only ever used on
+    POST /p/{username} (see router.upsert_registered_username): this mint
+    accepts an npub to serve alongside a registered username on
+    nostr.json (NIP-05), the same shape a WALLET would put in a kind 0
+    profile's own `nostr` field."""
+    hrp, data = bech32_decode(s)
+    if hrp != "npub" or data is None:
+        return None
+    decoded = convertbits(data, 5, 8, False)
+    return bytes(decoded) if decoded is not None and len(decoded) == 32 else None

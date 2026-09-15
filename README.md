@@ -18,12 +18,15 @@ a reference wallet implementation (hosted at
 |-----------------|-------------------------------------------------------------------------------|
 | `GET /`         | one-pager frontend: mint QR code (LNURL of the LUD-16 address), lightning address, mint limits, node info incl. capacity and mempool.space/amboss.space links |
 | `GET /.well-known/lnurlp/{username}` | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement) - the mint is payable at `{USERNAME}@{BASE_URL host}` (or the reserved bare-domain `_@{BASE_URL host}`, see below), and this is its only payRequest entry point (no separate bare `/p`) |
-| `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused. Takes a NIP-57 zap request as `nostr=` for a registered username, see "Zaps" below |
-| `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
+| `GET /p/cb`   | LUD-06 callback for this mint's own fixed identity - invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
+| `GET /p/{username}` | the same LUD-06 callback, for a registered `{username}` instead (see `POST /p/{username}` below) - no `?username=` query parameter, the path itself says which branch to auto-mint into. Takes a NIP-57 zap request as `nostr=`, see "Zaps" below |
+| `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb`/`/p/{username}` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
 | `GET /.well-known/lnurlw/{username}` | **Theoretical/experimental**: withdraw-side mirror of the LUD-16 address - informational only, see below |
-| `GET /register`  | [LUD-25](../luds/25.md) Part 2: claims a `{username}` for a WALLET's own `cx1` branch, so paying its lightning address auto-mints - see "Wallet-side ownership proofs" below |
+| `POST /p/{username}` | [LUD-25](../luds/25.md) Part 2: claims `{username}` for a WALLET's own `cx1` branch, so paying its lightning address auto-mints, or overwrites an existing claim's branch/npub wholesale - see "Wallet-side ownership proofs" below |
+| `DELETE /p/{username}` | frees an existing `{username}` claim entirely, back to first-come-first-served - see "Wallet-side ownership proofs" below |
+| `GET /.well-known/nostr.json` | [NIP-05](https://github.com/nostr-protocol/nips/blob/master/05.md), `?name=`: a registered username that also supplied an `npub` resolves as a Nostr identifier too - see "NIP-05" below |
 
 **Bare-domain address** ([LUD-16](../luds/16.md)): both well-known aliases
 above also answer for the reserved username `_`, alongside the configured
@@ -173,34 +176,63 @@ uses:
   spend secret) can verify it without contacting this mint at all.
 - **`cx1<P || chain_code>`** - a WALLET's watch-only export of its whole
   derivation branch for this mint (non-hardened, so every note's public
-  key is computable from `cx1` alone, never its private key) - see
-  `/register` below.
+  key is computable from `cx1` alone, never its private key) - see below.
 
-**cx1 registration & lightning-address auto-mint** (`GET /register`): a
-WALLET claims `?username=` against its own `?cx1=`, first-come-first-served,
-no proof of possession required - `cx1` alone never grants spending, only a
-note's own private key does, so a squatted registration only costs the real
-owner a friendly name, never funds. Once registered, paying
-`{username}@{BASE_URL host}` with **no `comment`** auto-mints a fresh `cp1`
-note directly on that branch (this mint derives the next unused key itself -
-`NoteStore.claim_next_index`, skipping any index already outstanding or
-spent, guarding the same race the spec's Seed & derivation describes) - no
-per-payment WALLET involvement needed at all. The payer's WALLET can still
-supply its own `comment=cp1<pk>` instead (e.g. the address owner minting for
-themselves with a specific key already in hand), which is honored as-is.
-Set `USERNAME_REGISTRATION_ENABLED=false` to turn this off entirely (404,
-same off-switch convention as `VERIFY_ENABLED`) - this mint's own fixed
-identity (`USERNAME`/the bare-domain `_`) is never affected either way.
-A registered username is always stored lowercase and matched
+**cx1 registration & lightning-address auto-mint** (`POST /p/{username}`): a
+WALLET claims `{username}` against its own `?cx1=`. A fresh, unclaimed name is
+first-come-first-served, no proof of possession required - `cx1` alone never
+grants spending, only a note's own private key does, so a squatted
+registration only costs the real owner a friendly name, never funds. Once
+registered, paying `{username}@{BASE_URL host}` with **no `comment`**
+auto-mints a fresh `cp1` note directly on that branch (this mint derives the
+next unused key itself - `NoteStore.claim_next_index`, skipping any index
+already outstanding or spent, guarding the same race the spec's Seed &
+derivation describes) - no per-payment WALLET involvement needed at all. The
+payer's WALLET can still supply its own `comment=cp1<pk>` instead (e.g. the
+address owner minting for themselves with a specific key already in hand),
+which is honored as-is; any other `comment` (an ordinary human LUD-12
+message, say) is simply ignored rather than rejected, and auto-mint proceeds
+as if none were sent. Set `USERNAME_REGISTRATION_ENABLED=false` to turn this
+off entirely (404, same off-switch convention as `VERIFY_ENABLED`) - this
+mint's own fixed identity (`USERNAME`/the bare-domain `_`) is never affected
+either way. A registered username is always stored lowercase and matched
 case-insensitively (same as `USERNAME` itself, see above) - `Alice`,
 `alice` and `ALICE` all resolve to the same identity regardless of which
 one a payer's client happened to send.
+
+Calling `POST /p/{username}` again on an **already-registered** name
+overwrites it wholesale (new `cx1`, and a new or absent `npub` - see NIP-05
+below) instead of claiming it fresh - and that path needs proof: `?sig=`, a
+recoverable signature made with the branch **currently on file**'s own
+index-0 secret key ("the first secret", the same key `claim_next_index`
+would hand a note out under first), over the fixed message `LNURLcash:register`
+wrapped the same "Lightning Signed Message" way every other signature here is
+(see Offline verification above) - deliberately a *different* message than a
+note's own `ck1` (which signs plain `LNURLcash`), so neither signature can
+ever be replayed as the other. It proves continued control of what is
+registered already, not of the new `cx1` being switched to, so a WALLET
+migrating to a new seed only needs to still hold its old one long enough to
+sign this once. `DELETE /p/{username}?sig=...` frees the name entirely (back
+to unclaimed, first-come-first-served) with the same signature required - there
+is no proof-free way to delete a name someone else may depend on.
+
+**NIP-05** ([nostr-protocol/nips#05](https://github.com/nostr-protocol/nips/blob/master/05.md),
+optional): `POST /p/{username}` also takes `?npub=` - a WALLET's own Nostr
+public key, NIP-19 bech32-encoded - which doubles `{username}@{BASE_URL host}`
+as a Nostr identifier too, not just a Lightning Address. `GET
+/.well-known/nostr.json?name={username}` then resolves it, the same query
+any NIP-05-aware Nostr client already makes. Only ever answers the one `name`
+asked about (never this mint's whole directory, even with no `name` at all),
+and only for a username that supplied an `npub` - an unregistered or
+`npub`-less name just comes back as an empty map, NIP-05's own "not found",
+never a 404. Omitting `npub` on an overwrite (see above) clears any
+previously registered one.
 
 **Zaps** ([NIP-57](https://github.com/nostr-protocol/nips/blob/master/57.md),
 optional): set `NOSTR_KEY` (32 bytes of hex, this mint's own Nostr key) and
 a registered username's payRequest carries `allowsNostr: true` and
 `nostrPubkey`. A zapping client then sends its kind 9734 zap request as
-`/p/cb?nostr=`; this mint checks it the way the NIP's Appendix D says (a
+`/p/{username}?nostr=`; this mint checks it the way the NIP's Appendix D says (a
 valid signature, exactly one `p`, at most one `e`, a `relays` tag, an
 `amount` that matches), binds the invoice to it by description hash, and
 mints the note on the username's branch exactly as any other payment there.

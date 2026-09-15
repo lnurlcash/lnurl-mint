@@ -151,3 +151,35 @@ def recover_note_pubkey(signature_hex: str) -> bytes:
     signature = bytes.fromhex(signature_hex)
     recovered = PublicKey.from_signature_and_message(signature, _CK1_FIXED_DIGEST, hasher=None)
     return recovered.format(compressed=True)[1:]
+
+
+# A username registration's ownership proof (router.py's POST/DELETE
+# /p/{username}): a WALLET's signature, with the branch's own index-0
+# secret key ("the first secret" - the same key claim_next_index would
+# hand out first, before this ever needed proving), over
+# "LNURLcash:register:<username>" (to overwrite an existing claim) or
+# "LNURLcash:unregister:<username>" (to delete one), per 25.md's Seed &
+# derivation. Domain-separated from a note's own `ck1` (_CK1_FIXED_DIGEST
+# above) so a note's spend/redemption signature can never be replayed
+# here, or vice versa - and binding `action`/`username` into the message
+# itself, rather than one fixed value reused everywhere, stops a
+# signature captured from one overwrite/delete being replayed against a
+# different username on the same branch, or against the other action for
+# that same username.
+def _register_message(action: str, username: str) -> str:
+    return f"{_DOMAIN_TAG}:{action}:{username}"
+
+
+def recover_register_pubkey(signature_hex: str, action: str, username: str) -> bytes:
+    """Recovers the 32-byte x-only public key a registration ownership-
+    proof signature was produced with - same recoverable-ECDSA primitive
+    as recover_note_pubkey, over _register_message(action, username)'s own
+    digest instead, so it can never be mistaken for a note's own `ck1`,
+    another username's proof, or this same username's other action.
+    `action` is "register" (upsert_registered_username's overwrite path)
+    or "unregister" (delete_registered_username). Raises ValueError on a
+    malformed signature, same as recover_note_pubkey."""
+    signature = bytes.fromhex(signature_hex)
+    digest = lightning_signed_message_digest(_register_message(action, username))
+    recovered = PublicKey.from_signature_and_message(signature, digest, hasher=None)
+    return recovered.format(compressed=True)[1:]
