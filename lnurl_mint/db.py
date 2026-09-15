@@ -580,6 +580,19 @@ class NoteStore:
         row = self.conn.execute("SELECT nostr_pubkey FROM usernames WHERE username = ?", (username,)).fetchone()
         return row[0] if row else None
 
+    def next_index_hint(self, username: str) -> int | None:
+        """The persisted best-known next-unused index on `username`'s
+        registered branch (LUD-25 Part 2's Internal mint transfers,
+        router.get_lnaddress's `text/xpub` metadata entry) - a plain read
+        of the same `next_index` column claim_next_index reserves from,
+        with none of its collision-skipping. Purely advisory ("`i` is
+        only a hint" per spec): a WALLET starts guessing from it, but
+        SERVICE still rejects a stale or already-taken index exactly like
+        any other p1/p2 collision, the same way claim_next_index itself
+        would skip past one. None if `username` was never claimed."""
+        row = self.conn.execute("SELECT next_index FROM usernames WHERE username = ?", (username,)).fetchone()
+        return row[0] if row else None
+
     def claim_next_index(self, username: str, derive: Callable[[int], str]) -> tuple[str, int]:
         """Picks and reserves the next usable note index on `username`'s
         registered branch - LUD-25 Part 2's own race-avoidance paragraph

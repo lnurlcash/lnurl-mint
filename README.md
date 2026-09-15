@@ -203,21 +203,36 @@ case-insensitively (same as `USERNAME` itself, see above) - `Alice`,
 `alice` and `ALICE` all resolve to the same identity regardless of which
 one a payer's client happened to send.
 
+**Internal mint transfers**: a registered username's payRequest metadata
+additionally carries a `["text/xpub", "<cx1>:<i>"]` entry - that same branch's
+own `cx1`, plus `i`, this mint's best-known next-unused index on it. A payer
+who already holds a `cp1`/`ck1` note on this same mint can read that straight
+off the recipient's Lightning Address and skip Lightning entirely: derive
+`pk_i` from `(cx1, i)` itself and name it as `p1`/`p2` on an ordinary
+rotate/split/merge, moving value between two notes on this mint with no
+invoice, no payment, and no round trip through the funding source at all. `i`
+is only a hint, not a reservation - if it's stale or another transfer already
+claimed it, the request fails exactly like any other already-in-use `p1`, and
+the sender just retries at the next index.
+
 Calling `POST /p/{username}` again on an **already-registered** name
 overwrites it wholesale (new `cx1`, and a new or absent `npub` - see NIP-05
 below) instead of claiming it fresh - and that path needs proof: `?sig=`, a
 recoverable signature made with the branch **currently on file**'s own
 index-0 secret key ("the first secret", the same key `claim_next_index`
-would hand a note out under first), over the fixed message `LNURLcash:register`
+would hand a note out under first), over `LNURLcash:register:<username>`,
 wrapped the same "Lightning Signed Message" way every other signature here is
 (see Offline verification above) - deliberately a *different* message than a
-note's own `ck1` (which signs plain `LNURLcash`), so neither signature can
-ever be replayed as the other. It proves continued control of what is
-registered already, not of the new `cx1` being switched to, so a WALLET
-migrating to a new seed only needs to still hold its old one long enough to
-sign this once. `DELETE /p/{username}?sig=...` frees the name entirely (back
-to unclaimed, first-come-first-served) with the same signature required - there
-is no proof-free way to delete a name someone else may depend on.
+note's own `ck1` (which signs plain `LNURLcash`), and binding both the action
+and the username into it so a signature captured from one overwrite/delete
+can never be replayed against a different username sharing that branch, or
+against the other action for that same one. It proves continued control of
+what is registered already, not of the new `cx1` being switched to, so a
+WALLET migrating to a new seed only needs to still hold its old one long
+enough to sign this once. `DELETE /p/{username}?sig=...` frees the name
+entirely (back to unclaimed, first-come-first-served) with the same kind of
+signature required instead, over `LNURLcash:unregister:<username>` - there is
+no proof-free way to delete a name someone else may depend on.
 
 **NIP-05** ([nostr-protocol/nips#05](https://github.com/nostr-protocol/nips/blob/master/05.md),
 optional): `POST /p/{username}` also takes `?npub=` - a WALLET's own Nostr

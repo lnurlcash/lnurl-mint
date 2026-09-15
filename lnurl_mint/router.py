@@ -810,7 +810,20 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     path rather than a query parameter on the fixed identity's `/p/cb` -
     so get_pay_callback_for_username knows which registered branch to
     derive into straight from the URL, no extra parameter needed.
-    Unregistered, unrecognized names still 404."""
+    Unregistered, unrecognized names still 404.
+
+    A registered username's metadata additionally carries a `text/xpub`
+    entry (LUD-25 Part 2's Internal mint transfers): this same branch's
+    own `cx1`, appended with `:<i>`, the best-known next-unused index on
+    it (NoteStore.next_index_hint). A payer's WALLET already holding a
+    `cp1`/`ck1` note on this same mint can read that straight off this
+    response and skip Lightning entirely - deriving `pk_i` itself and
+    naming it as `p1`/`p2` on an ordinary rotate/split/merge - rather
+    than paying an invoice just to reach the same auto-mint this address
+    would otherwise perform. `i` is only a hint; a stale or
+    already-claimed one is rejected exactly like any other p1/p2
+    collision, and `WALLET` just retries at the next index. The fixed
+    identity has no branch of its own, so it never carries this entry."""
     registered = _known_username(username) or _registered_username_branch(username) is not None
     if not registered:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
@@ -823,6 +836,12 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
         # names should see that same identity confirmed here
         ["text/identifier", f"{username}@{host}"],
     ]
+    if not _known_username(username):
+        branch_hex = _registered_username_branch(username)
+        if branch_hex is not None:
+            index_hint = notes.next_index_hint(username.lower()) or 0
+            cx1 = bech32m.encode_cx1(bytes.fromhex(branch_hex))
+            metadata_entries.append(["text/xpub", f"{cx1}:{index_hint}"])
     if settings.base_fee_msat or settings.fee_percent_ppm:
         # a SERVICE that omits this entry is assumed fee-free per spec, so
         # it's only added when there's actually a fee to disclose

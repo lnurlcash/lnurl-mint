@@ -4,6 +4,7 @@ against its own watch-only branch, and this mint auto-mints cp1 notes off
 it directly. Overwriting or deleting an existing claim needs an
 ownership-proof signature over the branch's own index-0 secret."""
 
+import json
 from hashlib import sha256
 from os import urandom
 
@@ -210,6 +211,96 @@ def test_registered_lnaddress_callback_carries_username(client: TestClient):
     data = client.get("/.well-known/lnurlp/dave").json()
     assert data["callback"] == "http://testserver/p/dave"
     assert data["tag"] == "payRequest"
+
+
+def test_registered_lnaddress_metadata_advertises_xpub_for_internal_transfers(client: TestClient):
+    """25.md's Internal mint transfers: a registered username's payRequest
+    metadata carries its own `cx1`, so a payer's WALLET already holding a
+    note on this mint can skip Lightning entirely - deriving the next note
+    key itself rather than paying an invoice."""
+    _, _, _, cx1 = _branch()
+    client.post(f"/p/gina?cx1={cx1}")
+    metadata = json.loads(client.get("/.well-known/lnurlp/gina").json()["metadata"])
+    assert ["text/xpub", f"{cx1}:0"] in metadata
+
+
+def test_fixed_identity_lnaddress_metadata_has_no_xpub(client: TestClient):
+    """This mint's own fixed identity has no watch-only branch to advertise
+    - only a registered (cx1-backed) username does."""
+    metadata = json.loads(client.get(f"/.well-known/lnurlp/{settings.username}").json()["metadata"])
+    assert not any(entry[0] == "text/xpub" for entry in metadata)
+
+
+def test_xpub_index_hint_advances_after_an_automint(client: TestClient, node: FakeNode):
+    """claim_next_index reserves and persists past the index it hands out
+    at callback (invoice-creation) time, not at settlement - so the
+    advertised hint must already reflect that on the very next lookup,
+    even before this particular invoice is paid."""
+    _, _, _, cx1 = _branch()
+    client.post(f"/p/hana?cx1={cx1}")
+    lnaddress = client.get("/.well-known/lnurlp/hana").json()
+    metadata = json.loads(lnaddress["metadata"])
+    assert ["text/xpub", f"{cx1}:0"] in metadata
+
+    pay_response = client.get(f"{lnaddress['callback']}?amount=5000")
+    assert pay_response.json().get("pr")
+
+    metadata = json.loads(client.get("/.well-known/lnurlp/hana").json()["metadata"])
+    assert ["text/xpub", f"{cx1}:1"] in metadata
+
+
+def test_internal_transfer_skips_lightning_via_rotate(client: TestClient, node: FakeNode, mint_note):
+    """The whole point of Internal mint transfers: a payer already holding
+    a note on this mint reads `ivan`'s `cx1`/index hint off his payRequest
+    metadata and lands a note directly on his branch via an ordinary
+    rotate - never paying a Lightning invoice to `ivan`'s address at all."""
+    p, branch_point, chain_code, cx1 = _branch()
+    client.post(f"/p/ivan?cx1={cx1}")
+    metadata = json.loads(client.get("/.well-known/lnurlp/ivan").json()["metadata"])
+    xpub_entry = next(entry for entry in metadata if entry[0] == "text/xpub")
+    advertised_cx1, index_hint = xpub_entry[1].rsplit(":", 1)
+    assert advertised_cx1 == cx1
+    decoded_branch = bech32m.decode_cx1(advertised_cx1)
+    assert decoded_branch == branch_point + chain_code
+
+    pk_i = derivation.derive_pubkey(branch_point, chain_code, int(index_hint))
+    cp1 = bech32m.encode_cp1(pk_i)
+
+    # the sender already holds an ordinary (legacy) note on this mint -
+    # rotating it directly onto ivan's derived key moves the value without
+    # ever touching ivan's own payRequest/invoice
+    k1 = mint_note(5000)
+    resp = client.get(f"/w/cb?k1={k1}&p1={cp1}")
+    assert resp.json()["status"] == "OK"
+    assert _note_value(client, pk_i.hex()) == 5000
+
+    # ivan's own advertised next_index is untouched by this - it's only a
+    # hint, never reserved by anything other than his own auto-mint path
+    metadata = json.loads(client.get("/.well-known/lnurlp/ivan").json()["metadata"])
+    assert ["text/xpub", f"{cx1}:{index_hint}"] in metadata
+
+
+def test_internal_transfer_to_a_stale_index_is_rejected_like_any_collision(
+    client: TestClient, node: FakeNode, mint_note
+):
+    """`i` is only a hint (25.md): if two senders race for the same
+    advertised index, the second one must fail cleanly, exactly like any
+    other already-in-use p1, never double-credit or overwrite."""
+    p, branch_point, chain_code, cx1 = _branch()
+    client.post(f"/p/jack?cx1={cx1}")
+    pk0 = derivation.derive_pubkey(branch_point, chain_code, 0)
+    cp1 = bech32m.encode_cp1(pk0)
+
+    first_k1 = mint_note(3000)
+    assert client.get(f"/w/cb?k1={first_k1}&p1={cp1}").json()["status"] == "OK"
+
+    second_k1 = mint_note(2000)
+    resp = client.get(f"/w/cb?k1={second_k1}&p1={cp1}")
+    assert resp.json()["status"] == "ERROR"
+    # the first transfer's note is untouched, the second sender's note
+    # was never burned
+    assert _note_value(client, pk0.hex()) == 3000
+    assert client.get(f"/w?k1={second_k1}").json()["maxWithdrawable"] == 2000
 
 
 def test_paying_registered_address_with_no_comment_automints(client: TestClient, node: FakeNode):
