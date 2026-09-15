@@ -1,8 +1,9 @@
 """LUD-25 Part 2 (25.md): Wallet-side ownership proofs + Offline verification
-for `cp1` notes - mint via comment=cp1<pk>, redeem via k1=ck1<sig>, and the
-cs1 certificates issued alongside rotate/split/merge and the informational
-GET."""
+for `cp1` notes - mint via comment=cp1<pk>, redeem via k1=ck1<pk><sig>, and
+the cs1 certificates issued alongside rotate/split/merge and the
+informational GET."""
 
+from hashlib import sha256
 from os import urandom
 
 from coincurve import PrivateKey, PublicKey
@@ -12,7 +13,7 @@ from lnurl_mint import bech32m
 from lnurl_mint.signing import lightning_signed_message_digest
 from tests.conftest import FakeNode
 
-_CK1_DIGEST = lightning_signed_message_digest("LNURLcash")
+_CK1_MESSAGE = sha256(b"LNURLcash").digest()
 
 
 def _note_keypair() -> tuple[PrivateKey, str]:
@@ -24,10 +25,12 @@ def _note_keypair() -> tuple[PrivateKey, str]:
 
 
 def _ck1(sk: PrivateKey) -> str:
-    """The bearer secret for a note owned by `sk` - a recoverable signature
-    over the one fixed message every ck1 signs, per Encoding."""
-    sig = sk.sign_recoverable(_CK1_DIGEST, hasher=None)
-    return bech32m.encode_ck1(sig)
+    """The bearer secret for a note owned by `sk` - a BIP-340 Schnorr
+    signature over the one fixed message every ck1 signs, per Encoding,
+    with `sk`'s own x-only pubkey travelling alongside it."""
+    pk_xonly = sk.public_key.format(compressed=True)[1:]
+    sig = sk.sign_schnorr(_CK1_MESSAGE)
+    return bech32m.encode_ck1(pk_xonly, sig)
 
 
 def _mint_cp1_note(client: TestClient, node: FakeNode, amount_msat: int) -> tuple[PrivateKey, str]:
@@ -193,3 +196,29 @@ def test_comment_rejects_wrong_length_cp1_lookalike(client: TestClient):
     bogus = bech32m.encode("cp", urandom(31))
     response = client.get(f"/p/cb?amount=5000&comment={bogus}")
     assert response.json()["status"] == "ERROR"
+
+
+def _legacy_ck1(sk: PrivateKey) -> str:
+    """TODO(deprecated): the pre-schnorr ck1 shape - a bare 65-byte
+    recoverable signature, no embedded pk - built the way an un-upgraded
+    WALLET still would, so tests can confirm the mint still honors it
+    during the transition (see bech32m.decode_ck1_legacy,
+    signing.recover_note_pubkey)."""
+    sig = sk.sign_recoverable(lightning_signed_message_digest("LNURLcash"), hasher=None)
+    return bech32m.encode("ck", sig)
+
+
+def test_legacy_ck1_still_redeems_a_cp1_note(client: TestClient, node: FakeNode):
+    """TODO(deprecated): a note redeemed with the old bare-signature ck1
+    shape must still work while the mint stays backwards compatible with
+    un-upgraded WALLETs."""
+    sk, cp1 = _mint_cp1_note(client, node, 5000)
+    legacy_k1 = _legacy_ck1(sk)
+    data = client.get(f"/w?k1={legacy_k1}").json()
+    assert data["minWithdrawable"] == data["maxWithdrawable"] == 5000
+
+    new_sk, new_cp1 = _note_keypair()
+    cb = client.get(f"/w/cb?k1={legacy_k1}&p1={new_cp1}").json()
+    assert cb["status"] == "OK"
+    new_k1 = _ck1(new_sk)
+    assert client.get(f"/w?k1={new_k1}").json()["maxWithdrawable"] == 5000

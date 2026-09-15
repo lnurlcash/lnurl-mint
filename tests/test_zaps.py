@@ -19,7 +19,6 @@ from lnurl_mint import bech32m, derivation, nostr
 from lnurl_mint import router as router_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from lnurl_mint.signing import lightning_signed_message_digest
 from tests.conftest import FakeNode
 
 MINT_KEY = urandom(32).hex()
@@ -38,8 +37,8 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
         derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
     )
     sk0 = PrivateKey.from_int((d + tweak) % _N)
-    digest = lightning_signed_message_digest(f"LNURLcash:{action}:{username}")
-    return sk0.sign_recoverable(digest, hasher=None).hex()
+    message = sha256(f"LNURLcash:{action}:{username}".encode()).digest()
+    return sk0.sign_schnorr(message).hex()
 
 
 def _branch() -> tuple[PrivateKey, bytes, bytes, str]:
