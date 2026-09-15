@@ -149,6 +149,21 @@ class Settings(BaseSettings):
     # single fixed identity, never a multi-tenant one.
     username_registration_enabled: bool = True
 
+    # NIP-05 (optional): serve GET /.well-known/nostr.json (router.get_nip05)
+    # and accept the optional `npub` argument to POST /p/{username} (see
+    # router.upsert_registered_username) - independent of
+    # username_registration_enabled above, which only gates whether a
+    # username can be claimed at all: an operator can allow registration
+    # while keeping every registrant's Nostr identity private (this off,
+    # that on), or vice versa refuse new registrations while still resolving
+    # npubs already on file (this on, that off). Off disables the endpoint
+    # entirely (404), same off-switch convention as verify_enabled/
+    # username_registration_enabled, and rejects an `npub` argument outright
+    # rather than silently storing one nothing will ever resolve. Unrelated
+    # to nostr_key below - that one gates NIP-57 zap receipts, a mint can
+    # offer either, both, or neither.
+    nip05_enabled: bool = True
+
     # NIP-57 zaps (optional): this mint's own Nostr key, 32 bytes of hex.
     # Set, a registered username's payRequest advertises `allowsNostr` and
     # `nostrPubkey`, /p/cb takes a kind 9734 zap request and commits the

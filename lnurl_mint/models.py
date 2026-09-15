@@ -191,6 +191,19 @@ class RegisterUsernameResponse(BaseModel):
     status: Literal["OK"] = "OK"
 
 
+class LnurlErrorResponse(BaseModel):
+    """LUD-01's universal error shape: every LNURL endpoint here always
+    replies HTTP 200, success or failure alike (see
+    error_handler.LnurlErrorResponseHandler) - `reason` carries a
+    human-readable explanation, never machine-parsed detail. Declared purely
+    so the OpenAPI schema can document this as a second possible 200 body
+    alongside each endpoint's own success model, instead of the framework's
+    default (and, here, never actually reachable) 422 Validation Error."""
+
+    status: Literal["ERROR"] = "ERROR"
+    reason: str
+
+
 class Nip05Response(BaseModel):
     """NIP-05's `.well-known/nostr.json` shape (router.get_nip05): a
     registered username that also supplied an npub at POST /p/{username}

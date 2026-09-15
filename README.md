@@ -244,7 +244,12 @@ asked about (never this mint's whole directory, even with no `name` at all),
 and only for a username that supplied an `npub` - an unregistered or
 `npub`-less name just comes back as an empty map, NIP-05's own "not found",
 never a 404. Omitting `npub` on an overwrite (see above) clears any
-previously registered one.
+previously registered one. Set `NIP05_ENABLED=false` to turn this off
+entirely (404, same off-switch convention as `VERIFY_ENABLED`) - `?npub=` is
+then rejected outright at registration too, rather than stored for an
+endpoint that won't resolve it. Independent of
+`USERNAME_REGISTRATION_ENABLED`: an operator can allow registration while
+keeping npub resolution off, or the reverse.
 
 **Zaps** ([NIP-57](https://github.com/nostr-protocol/nips/blob/master/57.md),
 optional): set `NOSTR_KEY` (32 bytes of hex, this mint's own Nostr key) and

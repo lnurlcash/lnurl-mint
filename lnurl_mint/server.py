@@ -6,6 +6,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 
 from . import __version__
 from .config import settings
@@ -203,3 +204,28 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 app.include_router(router)
 app.include_router(frontend_router)
+
+
+def _lnurl_openapi() -> dict:
+    """Every route in `router` always answers 200, success or failure alike
+    (see error_handler.LnurlErrorResponseHandler and each route's own
+    `LnurlErrorResponse`-widened response_model) - the framework's default
+    422 Validation Error can never actually happen on the wire, so it's
+    stripped here rather than left in the generated schema to mislead a
+    wallet author into handling a status this mint never sends. Cached on
+    app.openapi_schema exactly like FastAPI's own default implementation
+    (which this replaces wholesale, per its documented override pattern)."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
+    for path_item in schema.get("paths", {}).values():
+        for operation in path_item.values():
+            operation.get("responses", {}).pop("422", None)
+    schemas = schema.get("components", {}).get("schemas", {})
+    schemas.pop("HTTPValidationError", None)
+    schemas.pop("ValidationError", None)
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = _lnurl_openapi  # type: ignore[method-assign]

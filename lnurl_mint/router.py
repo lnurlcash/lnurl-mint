@@ -19,6 +19,7 @@ from .error_handler import LnurlErrorResponseHandler
 from .errors import log_internal_error
 from .mint_log import log_melt, log_mint
 from .models import (
+    LnurlErrorResponse,
     LnurlMintAddressResponse,
     LnurlPayActionResponse,
     LnurlPayResponse,
@@ -691,7 +692,7 @@ def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str) -> b
     return recovered == expected
 
 
-@router.post("/p/{username}", tags=["lnurlcash"])
+@router.post("/p/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse)
 def upsert_registered_username(username: str, cx1: str, sig: str, npub: str | None = None) -> RegisterUsernameResponse:
     """LUD-25 Part 2, Seed & derivation's cx1 registration: claims
     `username` for a WALLET's watch-only branch export (`cx1<P || chain
@@ -721,7 +722,10 @@ def upsert_registered_username(username: str, cx1: str, sig: str, npub: str | No
     site just lowercases its own input to match.
 
     `npub`, if given, is this same `username` doubling as a NIP-05 name
-    (see get_nip05): decoded and stored alongside cx1. Omitted on an
+    (see get_nip05): decoded and stored alongside cx1 - rejected outright
+    while settings.nip05_enabled is off, rather than accepted and stored for
+    an endpoint that won't resolve it (see that setting's own docstring,
+    independent of username_registration_enabled itself). Omitted on an
     overwrite, any previously registered npub is cleared - this call
     replaces the registration wholesale, it does not merge into it."""
     if not settings.username_registration_enabled:
@@ -734,6 +738,8 @@ def upsert_registered_username(username: str, cx1: str, sig: str, npub: str | No
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid cx1.")
     nostr_pubkey_hex: str | None = None
     if npub is not None:
+        if not settings.nip05_enabled:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "npub registration (NIP-05) is disabled on this mint.")
         decoded_npub = bech32m.decode_npub(npub)
         if decoded_npub is None:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid npub.")
@@ -750,7 +756,7 @@ def upsert_registered_username(username: str, cx1: str, sig: str, npub: str | No
     return RegisterUsernameResponse()
 
 
-@router.delete("/p/{username}", tags=["lnurlcash"])
+@router.delete("/p/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse)
 def delete_registered_username(username: str, sig: str) -> RegisterUsernameResponse:
     """Frees `username` entirely (NoteStore.delete_username) - it goes back
     to being unclaimed, first-come-first-served for anyone, same as it was
@@ -772,7 +778,7 @@ def delete_registered_username(username: str, sig: str) -> RegisterUsernameRespo
     return RegisterUsernameResponse()
 
 
-@router.get("/.well-known/nostr.json", tags=["lnurlcash"])
+@router.get("/.well-known/nostr.json", tags=["lnurlcash"], response_model=Nip05Response | LnurlErrorResponse)
 def get_nip05(name: str | None = None) -> Nip05Response:
     """NIP-05: a registered username that supplied an npub at POST
     /p/{username} (see upsert_registered_username, NoteStore.nostr_pubkey)
@@ -785,18 +791,25 @@ def get_nip05(name: str | None = None) -> Nip05Response:
     the exact local-part string it queried with, same convention
     get_lnaddress's text/identifier follows. An unregistered name, one
     that never supplied an npub, or no `name` at all all come back as an
-    empty map - NIP-05's own "not found", not a 404. Disabled outright
-    while username_registration_enabled is off, the same
+    empty map - NIP-05's own "not found", not a 404. The endpoint itself is
+    disabled outright (404, not an empty map) while settings.nip05_enabled
+    is off - a distinct off switch from username_registration_enabled below
+    (see nip05_enabled's own docstring), for an operator who wants this
+    mint's NIP-05 resolution gone entirely regardless of registration
+    status. Answers (200, empty map) rather than 404 while
+    username_registration_enabled itself is off, though: a name registered
+    before it was turned off does not leak through here either, the same
     revert-to-fixed-identity convention _registered_username_branch
-    follows - a name registered before it was turned off does not leak
-    through here either."""
+    follows."""
+    if not settings.nip05_enabled:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
     pubkey_hex = (
         notes.nostr_pubkey(name.lower()) if name is not None and settings.username_registration_enabled else None
     )
     return Nip05Response(names={name: pubkey_hex} if pubkey_hex is not None else {})
 
 
-@router.get("/.well-known/lnurlp/{username}", tags=["lnurlcash"])
+@router.get("/.well-known/lnurlp/{username}", tags=["lnurlcash"], response_model=LnurlPayResponse | LnurlErrorResponse)
 def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     """LUD-16 Lightning Address payRequest that mints lnurlcash bearer
     notes: `withdrawLink` points at the withdrawRequest endpoint
@@ -921,7 +934,9 @@ async def _mint_address_response(req: Request, username: str) -> LnurlMintAddres
     )
 
 
-@router.get("/.well-known/lnurlw/{username}", tags=["lnurlcash"])
+@router.get(
+    "/.well-known/lnurlw/{username}", tags=["lnurlcash"], response_model=LnurlMintAddressResponse | LnurlErrorResponse
+)
 async def get_mint_address(req: Request, username: str) -> LnurlMintAddressResponse:
     """Theoretical mint-address alias, the withdraw-side mirror of
     get_lnaddress above - see LnurlMintAddressResponse's own docstring for
@@ -1069,7 +1084,7 @@ async def _pay_callback(
     return LnurlPayActionResponse(pr=pr, verify=verify)
 
 
-@router.get("/p/cb", tags=["lnurlcash"])
+@router.get("/p/cb", tags=["lnurlcash"], response_model=LnurlPayActionResponse | LnurlErrorResponse)
 async def get_pay_callback(
     req: Request, amount: int, comment: str | None = None, nostr: str | None = None
 ) -> LnurlPayActionResponse:
@@ -1084,7 +1099,7 @@ async def get_pay_callback(
     return await _pay_callback(req, amount, comment, nostr, username=None, branch=None)
 
 
-@router.get("/p/{username}", tags=["lnurlcash"])
+@router.get("/p/{username}", tags=["lnurlcash"], response_model=LnurlPayActionResponse | LnurlErrorResponse)
 async def get_pay_callback_for_username(
     req: Request, username: str, amount: int, comment: str | None = None, nostr: str | None = None
 ) -> LnurlPayActionResponse:
@@ -1118,7 +1133,7 @@ async def _verify_response(
     return LnurlPayVerifyResponse(settled=settled, preimage=preimage, pr=pr)
 
 
-@router.get("/verify/{payment_hash}", tags=["lnurlcash"])
+@router.get("/verify/{payment_hash}", tags=["lnurlcash"], response_model=LnurlPayVerifyResponse | LnurlErrorResponse)
 async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     """LUD-21: reports whether an invoice this mint issued (via /p/cb) or
     paid out (a melt, via /w/cb - LUD-25) has settled - looked up by
@@ -1187,7 +1202,7 @@ async def _certificate(
     return bech32m.encode_cs1(amount_msat, bytes.fromhex(raw)) if is_cp1 else raw
 
 
-@router.get("/w", tags=["lnurlcash"])
+@router.get("/w", tags=["lnurlcash"], response_model=LnurlWithdrawResponse | LnurlErrorResponse)
 async def get_withdraw(
     req: Request,
     k1: str | None = None,
@@ -1300,7 +1315,7 @@ async def get_withdraw(
     )
 
 
-@router.get("/w/cb", tags=["lnurlcash"])
+@router.get("/w/cb", tags=["lnurlcash"], response_model=WithdrawSuccessResponse | LnurlErrorResponse)
 async def get_withdraw_callback(
     req: Request,
     background_tasks: BackgroundTasks,

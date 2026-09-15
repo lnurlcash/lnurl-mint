@@ -247,6 +247,35 @@ def test_nip05_hidden_while_username_registration_disabled(client: TestClient, m
     assert client.get("/.well-known/nostr.json?name=ray").json() == {"names": {}}
 
 
+def test_nip05_404s_while_nip05_disabled(client: TestClient, monkeypatch):
+    p, branch_point, chain_code, cx1 = _branch()
+    _, npub = _npub()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "sam")
+    client.post(f"/p/sam?cx1={cx1}&npub={npub}&sig={sig}")
+    monkeypatch.setattr(settings, "nip05_enabled", False)
+    resp = client.get("/.well-known/nostr.json?name=sam")
+    assert resp.json() == {"status": "ERROR", "reason": "Not found"}
+
+
+def test_registration_rejects_npub_while_nip05_disabled(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "nip05_enabled", False)
+    p, branch_point, chain_code, cx1 = _branch()
+    _, npub = _npub()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "tina")
+    resp = client.post(f"/p/tina?cx1={cx1}&npub={npub}&sig={sig}")
+    assert resp.json() == {"status": "ERROR", "reason": "npub registration (NIP-05) is disabled on this mint."}
+    assert notes.username_branch("tina") is None
+
+
+def test_registration_without_npub_still_works_while_nip05_disabled(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "nip05_enabled", False)
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "uma")
+    resp = client.post(f"/p/uma?cx1={cx1}&sig={sig}")
+    assert resp.json() == {"status": "OK"}
+    assert notes.username_branch("uma") is not None
+
+
 def test_unregistered_username_404s(client: TestClient):
     resp = client.get("/.well-known/lnurlp/nobody")
     assert resp.json() == {"status": "ERROR", "reason": "Unknown user."}
