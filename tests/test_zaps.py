@@ -30,6 +30,9 @@ _N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
 
 def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action: str, username: str) -> str:
+    # signs sha256(message), a 32-byte digest, not the raw message itself -
+    # see test_username_registration.py's own copy of this helper for the
+    # full rationale, and signing._schnorr_digest
     d = p.to_int()
     if p.public_key.format(compressed=True)[0] == 0x03:
         d = _N - d
@@ -37,8 +40,8 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
         derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
     )
     sk0 = PrivateKey.from_int((d + tweak) % _N)
-    message = f"LNURLcash:{action}:{username}".encode()
-    return sign_schnorr_message(sk0, message).hex()
+    digest = sha256(f"LNURLcash:{action}:{username}".encode()).digest()
+    return sign_schnorr_message(sk0, digest).hex()
 
 
 def _branch() -> tuple[PrivateKey, bytes, bytes, str]:

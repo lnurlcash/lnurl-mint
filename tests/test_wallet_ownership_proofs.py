@@ -3,6 +3,7 @@ for `cp1` notes - mint via comment=cp1<pk>, redeem via k1=ck1<pk><sig>, and
 the cs1 certificates issued alongside rotate/split/merge and the
 informational GET."""
 
+from hashlib import sha256
 from os import urandom
 
 from coincurve import PrivateKey, PublicKey
@@ -12,7 +13,11 @@ from lnurl_mint import bech32m
 from lnurl_mint.signing import lightning_signed_message_digest
 from tests.conftest import FakeNode, sign_schnorr_message
 
+# ck1 signs sha256("LNURLcash"), a 32-byte digest, not the raw 9-byte string
+# (see signing._CK1_SCHNORR_DIGEST) - most conforming Schnorr signers only
+# accept a 32-byte message.
 _CK1_MESSAGE = b"LNURLcash"
+_CK1_DIGEST = sha256(_CK1_MESSAGE).digest()
 
 
 def _note_keypair() -> tuple[PrivateKey, str]:
@@ -25,18 +30,26 @@ def _note_keypair() -> tuple[PrivateKey, str]:
 
 def _ck1(sk: PrivateKey) -> str:
     """The bearer secret for a note owned by `sk` - a BIP-340 Schnorr
-    signature over the one fixed message every ck1 signs, per Encoding,
+    signature over the one fixed digest every ck1 signs, per Encoding,
     with `sk`'s own x-only pubkey travelling alongside it."""
     pk_xonly = sk.public_key.format(compressed=True)[1:]
-    sig = sign_schnorr_message(sk, _CK1_MESSAGE)
+    sig = sign_schnorr_message(sk, _CK1_DIGEST)
     return bech32m.encode_ck1(pk_xonly, sig)
 
 
-def test_ck1_matches_shared_conformance_vector():
-    sk = PrivateKey(bytes.fromhex("6257b20051d8bf990abef9274b05eec72deed8f6a6adae958e91ceb51e06136a"))
+def test_ck1_matches_lud25_spec_test_vector_3():
+    """Cross-implementation check against 25.md's own published "Test
+    vector 3: Wallet-side ownership proof (ck1)" - lnurl-wallet's kit
+    (src/lib/specVectors.test.ts) asserts the exact same numbers. sk_0/pk_0
+    here are Test Vector 1's, per 25.md."""
+    sk = PrivateKey(bytes.fromhex("944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f"))
+    assert sk.public_key.format(compressed=True)[1:].hex() == (
+        "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634"
+    )
+    assert _CK1_DIGEST.hex() == "49a9bb7cae28a0c1f77bc7fac7693456b1cc149f83c413acfd938dc95ea21cf5"
     assert _ck1(sk) == (
-        "ck1t48us5upk2653jqzm94rhwvv9vnclm6kdeygs4z6hu0tkleml3ulwhtn60lj3h29m7mmztrgtlehqzuqg6e2n0ct3"
-        "mrldefxv50jpeg2d7ns73eqn6c8duewvhgq28wfultlwu0jhcyp7ag4x35k39t4puvjejfa"
+        "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc62s0003psm2kxx7p8dsal9arwd7e6usu04cjens0"
+        "qhywer99jc5sz9zqptmg4gyjlgg2zpglhl8atjj6zsfsh5ffnzn4k73naafcukpgdezzqx"
     )
 
 
@@ -226,6 +239,36 @@ def test_legacy_ck1_still_redeems_a_cp1_note(client: TestClient, node: FakeNode)
 
     new_sk, new_cp1 = _note_keypair()
     cb = client.get(f"/w/cb?k1={legacy_k1}&p1={new_cp1}").json()
+    assert cb["status"] == "OK"
+    new_k1 = _ck1(new_sk)
+    assert client.get(f"/w?k1={new_k1}").json()["maxWithdrawable"] == 5000
+
+
+def _raw_message_ck1(sk: PrivateKey) -> str:
+    """TODO(deprecated, remove once no such notes are expected to remain in
+    the wild): the current pk||sig shape, but signed over the raw 9-byte
+    "LNURLcash" string instead of sha256("LNURLcash") - the scheme in
+    effect before the "32-byte hashed message" change (../luds commit
+    6de59b2). Built the way a not-yet-upgraded WALLET still would, so tests
+    can confirm the mint still honors it during the transition (see
+    signing.verify_ck1_signature's own fallback)."""
+    pk_xonly = sk.public_key.format(compressed=True)[1:]
+    sig = sign_schnorr_message(sk, b"LNURLcash")
+    return bech32m.encode_ck1(pk_xonly, sig)
+
+
+def test_raw_message_ck1_still_redeems_a_cp1_note(client: TestClient, node: FakeNode):
+    """TODO(deprecated): a note redeemed with a ck1 signed under the OLD
+    raw-message scheme must still work while the mint stays backwards
+    compatible with a WALLET that hasn't rotated it onto the current
+    hashed-message scheme yet."""
+    sk, cp1 = _mint_cp1_note(client, node, 5000)
+    old_k1 = _raw_message_ck1(sk)
+    data = client.get(f"/w?k1={old_k1}").json()
+    assert data["minWithdrawable"] == data["maxWithdrawable"] == 5000
+
+    new_sk, new_cp1 = _note_keypair()
+    cb = client.get(f"/w/cb?k1={old_k1}&p1={new_cp1}").json()
     assert cb["status"] == "OK"
     new_k1 = _ck1(new_sk)
     assert client.get(f"/w?k1={new_k1}").json()["maxWithdrawable"] == 5000

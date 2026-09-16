@@ -61,7 +61,9 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
     "unregister" (matching delete_registered_username) - the two are never
     interchangeable. `username` must already be lowercase: the endpoint
     lowercases it before ever checking a signature, so a sig signed over a
-    mixed-case username would simply never match."""
+    mixed-case username would simply never match. Signs sha256(message), a
+    32-byte digest, not the raw message itself - see signing._schnorr_digest
+    for why."""
     d = p.to_int()
     if p.public_key.format(compressed=True)[0] == 0x03:
         d = _N - d
@@ -69,8 +71,8 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
         derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
     )
     sk0 = PrivateKey.from_int((d + tweak) % _N)
-    message = f"LNURLcash:{action}:{username}".encode()
-    return sign_schnorr_message(sk0, message).hex()
+    digest = sha256(f"LNURLcash:{action}:{username}".encode()).digest()
+    return sign_schnorr_message(sk0, digest).hex()
 
 
 def _npub() -> tuple[bytes, str]:
