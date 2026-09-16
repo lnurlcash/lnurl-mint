@@ -23,7 +23,10 @@ def test_cs1_matches_lud25_spec_test_vector_4():
 
     digest_1000 = lightning_signed_message_digest(f"LNURLcash:1000:{pk}")
     assert digest_1000.hex() == "30894ad113df18b1e00a27015ed62e8b94a87498c8da7997ddac48e4cd7bb20f"
-    sig_1000 = "41a69c2e826555b1c5c099b3166e8d50cc3bbba3ccb9b87c377e96ae070d532c3b6230194ae97d322d663fb38266abd26f3553c62a7d5a528ce9c72d3838fffc01"
+    sig_1000 = (
+        "41a69c2e826555b1c5c099b3166e8d50cc3bbba3ccb9b87c377e96ae070d532c3b6230194ae97d322d663fb38266abd2"
+        "6f3553c62a7d5a528ce9c72d3838fffc01"
+    )
     assert verify_note(mint_pubkey, pk, 1000, sig_1000)
     assert bech32m.encode_cs1(1000, bytes.fromhex(sig_1000)) == (
         "cs10n1gxnfct5zv42mr3wqnxe3vm5d2rxrhwarejumslph06t2upcd2vkrkc3sr99wjlfj94nrlvuzv64ayme420rz5l2622xwn3ed8qu0llqpeg9n5x"
@@ -31,7 +34,10 @@ def test_cs1_matches_lud25_spec_test_vector_4():
 
     digest_21m = lightning_signed_message_digest(f"LNURLcash:21000000:{pk}")
     assert digest_21m.hex() == "6186fd2c1c258a6c0a3627e895efbc3d0988325c4f36f0050b52b4c4751ab13d"
-    sig_21m = "b5c6c3dd151708501bc8820ae00ef3d6439cdcca8bac00fb2675fee6b89a7767079e37f62c2502c6744a56295c459d52c0475e27a0eb34745790b44c54b9386200"
+    sig_21m = (
+        "b5c6c3dd151708501bc8820ae00ef3d6439cdcca8bac00fb2675fee6b89a7767079e37f62c2502c6744a56295c459d52c"
+        "0475e27a0eb34745790b44c54b9386200"
+    )
     assert verify_note(mint_pubkey, pk, 21000000, sig_21m)
     assert bech32m.encode_cs1(21000000, bytes.fromhex(sig_21m)) == (
         "cs210u1khrv8hg4zuy9qx7gsg9wqrhn6epeehx23wkqp7exwhlwdwy6wans083h7ckz2qkxw399v22ugkw49sz8tcn6p6e5w3tepdzv2junscsqwvvr03"
