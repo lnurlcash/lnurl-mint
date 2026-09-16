@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from lnurl_mint import bech32m, derivation
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
+from lnurl_mint.signing import verify_register_signature
 from tests.conftest import FakeNode, sign_schnorr_message
 
 # secp256k1 group order - needed to mirror derive_pubkey's BIP-340 x-only
@@ -107,6 +108,36 @@ def test_register_claims_a_username(client: TestClient):
     resp = client.post(f"/p/alice?cx1={cx1}&sig={sig}")
     assert resp.json() == {"status": "OK"}
     assert notes.username_branch("alice") == bech32m.decode_cx1(cx1).hex()
+
+
+def test_register_and_unregister_proofs_match_lud25_spec_test_vector_2():
+    """Cross-implementation check against 25.md's own published "Test
+    vector 2: Seed & derivation (branch root has even-y P) + LN address
+    registration proof" - sk_0/pk_0 are test vector 2's own (SERVICE domain
+    cash.example.com; test_derivation.py's test_matches_lud25_spec_test_vector_2
+    already confirms this pk_0 is what derive_pubkey produces for that
+    branch at index 0). Unlike _ownership_sig's other tests here, which
+    only self-check against randomly generated branches, this asserts
+    verify_register_signature against the literal signature bytes 25.md
+    publishes - the part that changed with the "32-byte hashed message"
+    fix (../luds commit 6de59b2), since a variable-length username was
+    never 32 bytes to begin with."""
+    pk_0 = bytes.fromhex("23bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130")
+    register_sig = (
+        "baf04336aad76953b437725a6f0b03d295da8792b4d9d36affb8a5d9913df1d5750ed161a8c389f96441711d55306c13a"
+        "3c2362d3542453f7c10f428f1721461"
+    )
+    unregister_sig = (
+        "8d7527d0474528770e5c8ac68cc3dbb6841c9e924f78f7d5187d77514c829f781de2a28d3bf9eec9f2ac5439664d215eec"
+        "3915c95b05c1d6cc31cab3c946f068"
+    )
+    assert verify_register_signature(pk_0, register_sig, "register", "alice")
+    assert verify_register_signature(pk_0, unregister_sig, "unregister", "alice")
+
+    # a register proof is never valid as an unregister one (or vice versa)
+    # - action is bound into the signed digest, not just checked alongside it
+    assert not verify_register_signature(pk_0, register_sig, "unregister", "alice")
+    assert not verify_register_signature(pk_0, unregister_sig, "register", "alice")
 
 
 def test_register_without_a_signature_rejected(client: TestClient):

@@ -2,9 +2,51 @@ import logging
 
 from fastapi.testclient import TestClient
 
+from lnurl_mint import bech32m
 from lnurl_mint.config import settings
-from lnurl_mint.signing import verify_note
+from lnurl_mint.signing import lightning_signed_message_digest, verify_note
 from tests.conftest import fresh_secret
+
+
+def test_cs1_matches_lud25_spec_test_vector_4():
+    """Cross-implementation check against 25.md's own published "Test
+    vector 4: Offline verification (mint's cs1 certificate)" - an
+    arbitrary SERVICE signing key (unrelated to any WALLET seed, per the
+    vector's own intro) and pk_0 from test vector 1
+    (test_ck1_matches_lud25_spec_test_vector_3 already confirms that pk_0),
+    certified for two different amounts. Everything else in this file only
+    self-checks sign_note/verify_note by round-tripping against randomly
+    generated keys via a FakeNode - deterministic, but never against a
+    value anything outside this file could reproduce."""
+    mint_pubkey = "035acdbd57663f858be6d61ec4bfcbc99492699010f1451e30a6550f26295e813d"
+    pk = "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634"
+
+    digest_1000 = lightning_signed_message_digest(f"LNURLcash:1000:{pk}")
+    assert digest_1000.hex() == "30894ad113df18b1e00a27015ed62e8b94a87498c8da7997ddac48e4cd7bb20f"
+    sig_1000 = (
+        "41a69c2e826555b1c5c099b3166e8d50cc3bbba3ccb9b87c377e96ae070d532c3b6230194ae97d322d663fb38266abd2"
+        "6f3553c62a7d5a528ce9c72d3838fffc01"
+    )
+    assert verify_note(mint_pubkey, pk, 1000, sig_1000)
+    assert bech32m.encode_cs1(1000, bytes.fromhex(sig_1000)) == (
+        "cs10n1gxnfct5zv42mr3wqnxe3vm5d2rxrhwarejumslph06t2upcd2vkrkc3sr99wjlfj94nrlvuzv64ayme420rz5l2622xwn3ed8qu0llqpeg9n5x"
+    )
+
+    digest_21m = lightning_signed_message_digest(f"LNURLcash:21000000:{pk}")
+    assert digest_21m.hex() == "6186fd2c1c258a6c0a3627e895efbc3d0988325c4f36f0050b52b4c4751ab13d"
+    sig_21m = (
+        "b5c6c3dd151708501bc8820ae00ef3d6439cdcca8bac00fb2675fee6b89a7767079e37f62c2502c6744a56295c459d52c"
+        "0475e27a0eb34745790b44c54b9386200"
+    )
+    assert verify_note(mint_pubkey, pk, 21000000, sig_21m)
+    assert bech32m.encode_cs1(21000000, bytes.fromhex(sig_21m)) == (
+        "cs210u1khrv8hg4zuy9qx7gsg9wqrhn6epeehx23wkqp7exwhlwdwy6wans083h7ckz2qkxw399v22ugkw49sz8tcn6p6e5w3tepdzv2junscsqwvvr03"
+    )
+
+    # cross-amount replay must fail - amount is folded into the signed
+    # message itself, not carried alongside it as an unverified label
+    assert not verify_note(mint_pubkey, pk, 21000000, sig_1000)
+    assert not verify_note(mint_pubkey, pk, 1000, sig_21m)
 
 
 def test_mint_pubkey_absent_without_a_funding_source(client: TestClient, mint_note, monkeypatch):
