@@ -127,25 +127,41 @@ def verify_note(pubkey_hex: str, note_id_hex: str, amount_msat: int, signature_h
     return recovered.format(compressed=True).hex() == pubkey_hex
 
 
-# LUD-25 Part 2, Encoding (post "actually use schnorr sigs..." - ../luds
-# commit da07aa0): everything a WALLET itself signs with a note's own key or
-# a branch's index-0 key (ck1, and the registration ownership proof below)
-# is a plain BIP-340 Schnorr signature over a fixed domain string, verified
-# directly against the pubkey it's paired with (ck1) or already on file
-# (registration) - never recovered. BIP-340 and libsecp256k1 verification
-# both accept arbitrary-length messages; these protocol strings are passed
-# as their raw UTF-8 bytes exactly as 25.md specifies, without an extra hash.
-def _schnorr_message(message: str) -> bytes:
-    return message.encode()
+# LUD-25 Part 2, Encoding (post "32byte hashed message" - ../luds commit
+# 6de59b2, following "actually use schnorr sigs..." - ../luds commit
+# da07aa0): everything a WALLET itself signs with a note's own key or a
+# branch's index-0 key (ck1, and the registration ownership proof below) is
+# a plain BIP-340 Schnorr signature over sha256(a fixed domain string) - a
+# 32-byte digest, verified directly against the pubkey it's paired with
+# (ck1) or already on file (registration) - never recovered. The message is
+# hashed before signing rather than passed as its raw, variable-length UTF-8
+# bytes: BIP-340's own reference implementation, and most conforming Schnorr
+# signers (this module's own `coincurve`/`libsecp256k1` included), only
+# accept a 32-byte message.
+def _schnorr_digest(message: str) -> bytes:
+    return sha256(message.encode()).digest()
 
 
 # A `ck1` is a WALLET's signature with a `cp1` note's own sk, over this one
-# fixed message - unlike `cs1` (per-note, amount-and-pubkey-bound, see
+# fixed digest - unlike `cs1` (per-note, amount-and-pubkey-bound, see
 # _message/sign_note), the same `ck1` value is reused everywhere that
-# note's secret is needed, redemption included, so the message it signs can
+# note's secret is needed, redemption included, so the digest it signs can
 # never depend on anything about the note itself. Precomputed once: every
-# ck1 verification reuses the identical message.
-_CK1_SCHNORR_MESSAGE = _schnorr_message(_DOMAIN_TAG)
+# ck1 verification reuses the identical digest.
+_CK1_SCHNORR_DIGEST = _schnorr_digest(_DOMAIN_TAG)
+
+# TODO(deprecated, remove once no such notes are expected to remain in the
+# wild): the raw, un-hashed message a ck1 was signed over before the
+# "32-byte hashed message" change (2026-09-16, ../luds commit 6de59b2) - same
+# current pk||sig shape as _CK1_SCHNORR_DIGEST above, just verified against
+# the wrong (pre-fix) digest. verify_ck1_signature falls back to this ONLY
+# for ck1 (redemption of an already-minted note) - a WALLET never signs
+# under this scheme anymore, and verify_register_signature has no
+# equivalent fallback: registering/unregistering a Lightning Address is a
+# fresh action a WALLET initiates itself, never a stored bearer secret read
+# back later, so there is no "old registration a holder still needs to
+# redeem" case for it to cover.
+_CK1_SCHNORR_MESSAGE_LEGACY = _DOMAIN_TAG.encode()
 
 
 def verify_ck1_signature(pubkey: bytes, signature: bytes) -> bool:
@@ -157,9 +173,16 @@ def verify_ck1_signature(pubkey: bytes, signature: bytes) -> bool:
     recovered - the pubkey IS the note id to look up, once this returns
     True. False (never raises) on a malformed pubkey or signature - the
     same way a malformed legacy k1 fails HEX32_PATTERN, left to the caller
-    to turn into the ordinary "invalid k1" response."""
+    to turn into the ordinary "invalid k1" response.
+
+    Tries the current digest first, then TODO(deprecated) falls back to the
+    OLD raw-message digest (_CK1_SCHNORR_MESSAGE_LEGACY) so a note minted
+    before the hashed-message change stays redeemable until its holder
+    rotates it onto the current scheme."""
     try:
-        return PublicKeyXOnly(pubkey).verify(signature, _CK1_SCHNORR_MESSAGE)
+        if PublicKeyXOnly(pubkey).verify(signature, _CK1_SCHNORR_DIGEST):
+            return True
+        return PublicKeyXOnly(pubkey).verify(signature, _CK1_SCHNORR_MESSAGE_LEGACY)
     except ValueError:
         return False
 
@@ -195,15 +218,16 @@ def recover_note_pubkey(signature_hex: str) -> bytes:
 # /p/{username}): a WALLET's signature, with the branch's own index-0
 # secret key ("the first secret" - the same key claim_next_index would
 # hand out first, before this ever needed proving), over
-# "LNURLcash:register:<username>" (to overwrite an existing claim) or
-# "LNURLcash:unregister:<username>" (to delete one), per 25.md's Seed &
-# derivation. Domain-separated from a note's own `ck1` (_CK1_SCHNORR_MESSAGE
-# above) so a note's spend/redemption signature can never be replayed
-# here, or vice versa - and binding `action`/`username` into the message
-# itself, rather than one fixed value reused everywhere, stops a
-# signature captured from one overwrite/delete being replayed against a
-# different username on the same branch, or against the other action for
-# that same username.
+# sha256("LNURLcash:register:<username>") (to overwrite an existing claim)
+# or sha256("LNURLcash:unregister:<username>") (to delete one), per 25.md's
+# Seed & derivation - hashed for the same 32-byte-message reason
+# _schnorr_digest's own docstring gives, `username` being variable-length.
+# Domain-separated from a note's own `ck1` (_CK1_SCHNORR_DIGEST above) so a
+# note's spend/redemption signature can never be replayed here, or vice
+# versa - and binding `action`/`username` into the message itself, rather
+# than one fixed value reused everywhere, stops a signature captured from
+# one overwrite/delete being replayed against a different username on the
+# same branch, or against the other action for that same username.
 def _register_message(action: str, username: str) -> str:
     return f"{_DOMAIN_TAG}:{action}:{username}"
 
@@ -212,7 +236,7 @@ def verify_register_signature(pubkey: bytes, signature_hex: str, action: str, us
     """Whether `signature_hex` is a valid registration ownership-proof
     Schnorr signature by `pubkey` (the branch's own index-0 public key,
     already derived by the caller from the cx1 on file - router._owns_branch)
-    over _register_message(action, username). `action` is "register"
+    over sha256(_register_message(action, username)). `action` is "register"
     (upsert_registered_username's overwrite path) or "unregister"
     (delete_registered_username). Unlike the note-redemption path, there is
     no legacy fallback here: SERVICE derives `pubkey` itself from `cx1`
@@ -224,6 +248,6 @@ def verify_register_signature(pubkey: bytes, signature_hex: str, action: str, us
     except ValueError:
         return False
     try:
-        return PublicKeyXOnly(pubkey).verify(signature, _schnorr_message(_register_message(action, username)))
+        return PublicKeyXOnly(pubkey).verify(signature, _schnorr_digest(_register_message(action, username)))
     except ValueError:
         return False

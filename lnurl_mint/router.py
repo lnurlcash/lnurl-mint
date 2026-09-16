@@ -683,7 +683,7 @@ def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str) -> b
     same one claim_next_index would hand a note out under first.
     `action` ("register" or "unregister") and `username` are folded into
     the signed message itself, per 25.md - domain separation from a
-    note's own `ck1` (see signing._CK1_SCHNORR_MESSAGE), AND from any other
+    note's own `ck1` (see signing._CK1_SCHNORR_DIGEST), AND from any other
     username's proof or this same username's other action, so a
     signature captured from one overwrite/delete can never be replayed
     against a different username sharing this branch, or against the
