@@ -77,3 +77,93 @@ def test_tagged_hash_matches_bip340_reference():
     msg = b"hello"
     expected = sha256(sha256(tag).digest() + sha256(tag).digest() + msg).digest()
     assert tagged_hash(tag, msg) == expected
+
+
+# --- Cross-implementation check against ../luds/25.md's own published
+# "Test Vectors" section --------------------------------------------------
+#
+# Everything above only self-checks against randomly-generated branch
+# points - deterministic, but never against a value anything outside this
+# file could reproduce. These vectors are the ones 25.md itself publishes
+# (https://github.com/lnurl/luds/blob/lnurlcash/25.md#test-vectors),
+# generated from and cross-checked against lnurl-wallet's own kit
+# (src/lib/specVectors.test.ts asserts the exact same numbers against its
+# deriveNotePubkey/deriveNoteSecretKey). If this mint's derive_pubkey ever
+# disagrees with them, a note minted to a WALLET's branch under one
+# implementation would silently be unfindable under the other - the two
+# repos have no other way to catch that short of an end-to-end run against
+# each other.
+#
+# Vector 1 and vector 2 deliberately land on opposite y-parities for their
+# own branch key P (see 25.md's own vector intro) - between the two, this
+# exercises both sides of the sk_i formula's parity branch, even though
+# derive_pubkey itself (the SERVICE-side half) never needs sk_i or the
+# parity check at all: PublicKeyXOnly.tweak_add's own lift_x handles
+# whichever y the underlying point has internally.
+
+
+def test_matches_lud25_spec_test_vector_1():
+    """25.md "Test vector 1: Seed & derivation (branch root has odd-y P)" -
+    BIP-32's own published "Test vector 1" seed, SERVICE domain
+    mint.example. Index 5 is included (not just 0-2) because the vector
+    itself does, to show i is a plain ser32(i) encode, not restricted to a
+    contiguous run."""
+    branch_point = bytes.fromhex("b783d2930dc053a971f019054ca43e7c9de50e0769de872dd1ddde5d0bf4c9d1")
+    chain_code = bytes.fromhex("ab91cc11aea395ea6b62292a6147f51ef4150ebea04e745137b68719e238f904")
+    expected_pk = {
+        0: "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
+        1: "f0c1ea9aede945b9cf84f3bf8df27ac65154a937e4d10cb8a5865df0583b1083",
+        2: "c1e51bc2b8ad1c6ecfe382fe201c322506e2783a2e4d3eae0da47fece2eab078",
+        5: "c2b6a6d230d3ca51cc680bf84948c416eab70109542a0cf4fd1fbebbd647891a",
+    }
+    for index, pk_hex in expected_pk.items():
+        assert derive_pubkey(branch_point, chain_code, index).hex() == pk_hex
+
+    # t_0 explicitly, not just the final pk_0 - 25.md publishes it as
+    # tagged_hash(...) mod n, but the raw tagged_hash output already
+    # happens to be < n for this index (as for every index in both
+    # vectors - see 25.md's own note on this), so it's numerically
+    # identical to the mod-n-reduced value the spec shows
+    t_0 = tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big"))
+    assert t_0.hex() == "10054a4025dc5678a26e16087703ac1af6be92dab9cc20f10c5a5ae0ffbd057c"
+
+
+def test_matches_lud25_spec_test_vector_1_cx1_encoding():
+    """cx1<P || chain_code> from the same vector, via this implementation's
+    own bech32m encoder - confirms it agrees with the kit's @scure/base one
+    byte-for-byte, not just the underlying point math."""
+    from lnurl_mint.bech32m import encode_cx1
+
+    branch_point = bytes.fromhex("b783d2930dc053a971f019054ca43e7c9de50e0769de872dd1ddde5d0bf4c9d1")
+    chain_code = bytes.fromhex("ab91cc11aea395ea6b62292a6147f51ef4150ebea04e745137b68719e238f904")
+    assert encode_cx1(branch_point + chain_code) == (
+        "cx1k7pa9ycdcpf6ju0sryz5efp70jw72rs8d80gwtw3mh096zl5e8g6hywvzxh28902dd3zj2npgl63aaq4p6l2qnn52ymmdpceugu0jpqes280t"
+    )
+
+
+def test_matches_lud25_spec_test_vector_2():
+    """25.md "Test vector 2: Seed & derivation (branch root has even-y P)" -
+    BIP-32's own published "Test vector 2" seed, SERVICE domain
+    cash.example.com."""
+    branch_point = bytes.fromhex("64885a9cab93ec051761b8a0b80e1854a61865878d58f72a365dfd640850f675")
+    chain_code = bytes.fromhex("6b95795f9807ada85c8ca50ec93c921483a183abfed4a3b4abe6b95c89880306")
+    expected_pk = {
+        0: "23bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130",
+        1: "b1ab49e8ca397385ccb6d17d611bf8afc75390513bdcdfe3d760e0bb9860e0aa",
+        2: "9cf00b60589f863cedd2773b42341e6f5102d6bd23d04559a3103d50611b2ada",
+    }
+    for index, pk_hex in expected_pk.items():
+        assert derive_pubkey(branch_point, chain_code, index).hex() == pk_hex
+
+    t_0 = tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big"))
+    assert t_0.hex() == "4d010c0ae5b4e0def5d0eb651d5e08de7fc36aef5703231480372b24688d2711"
+
+
+def test_matches_lud25_spec_test_vector_2_cx1_encoding():
+    from lnurl_mint.bech32m import encode_cx1
+
+    branch_point = bytes.fromhex("64885a9cab93ec051761b8a0b80e1854a61865878d58f72a365dfd640850f675")
+    chain_code = bytes.fromhex("6b95795f9807ada85c8ca50ec93c921483a183abfed4a3b4abe6b95c89880306")
+    assert encode_cx1(branch_point + chain_code) == (
+        "cx1vjy9489tj0kq29mphzstsrsc2jnpsev834v0w23kth7kgzzs7e6kh9tet7vq0tdgtjx22rkf8jfpfqapsw4la49rkj47dw2u3xyqxpspgvxpa"
+    )
