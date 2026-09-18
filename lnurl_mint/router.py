@@ -676,32 +676,36 @@ def _registrable_username(username: str) -> bool:
     return bool(_USERNAME_PATTERN.match(username)) and not _known_username(username)
 
 
-def _owns_branch(action: str, username: str, branch_hex: str, sig_hex: str) -> bool:
+def _owns_branch(action: str, domain: str, username: str, branch_hex: str, sig_hex: str) -> bool:
     """Whether `sig_hex` is a valid ownership-proof Schnorr signature (see
     signing.verify_register_signature) by `branch_hex`'s own index-0
     public key - "the first secret" a WALLET derives on a branch, the
     same one claim_next_index would hand a note out under first.
-    `action` ("register" or "unregister") and `username` are folded into
-    the signed message itself, per 25.md - domain separation from a
-    note's own `ck1` (see signing._CK1_SCHNORR_DIGEST), AND from any other
-    username's proof or this same username's other action, so a
-    signature captured from one overwrite/delete can never be replayed
-    against a different username sharing this branch, or against the
-    other action for this same one. Gates every path through
-    upsert_registered_username (both a fresh claim, proven against the NEW
-    cx1 being submitted, and an overwrite, proven against whichever branch
-    is CURRENTLY on file - see that function's own docstring for why those
-    differ) and delete_registered_username outright - there is no
+    `action` ("register" or "unregister"), `domain` (this mint's own
+    resolved host - see call sites), and `username` are folded into the
+    signed message itself, per 25.md - domain separation from a note's own
+    `ck1` (see signing._CK1_SCHNORR_DIGEST); from any other username's
+    proof or this same username's other action, so a signature captured
+    from one overwrite/delete can never be replayed against a different
+    username sharing this branch, or against the other action for this
+    same one; and from any other mint, so a proof captured here can never
+    be replayed by this mint against a different one. Gates every path
+    through upsert_registered_username (both a fresh claim, proven against
+    the NEW cx1 being submitted, and an overwrite, proven against whichever
+    branch is CURRENTLY on file - see that function's own docstring for why
+    those differ) and delete_registered_username outright - there is no
     proof-free case left; `sig` is a required parameter at both call
     sites, never optional."""
     branch = bytes.fromhex(branch_hex)
     branch_point, chain_code = branch[:32], branch[32:]
     expected = derivation.derive_pubkey(branch_point, chain_code, 0)
-    return verify_register_signature(expected, sig_hex, action, username)
+    return verify_register_signature(expected, sig_hex, action, domain, username)
 
 
 @router.post("/p/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse)
-def upsert_registered_username(username: str, cx1: str, sig: str, npub: str | None = None) -> RegisterUsernameResponse:
+def upsert_registered_username(
+    req: Request, username: str, cx1: str, sig: str, npub: str | None = None
+) -> RegisterUsernameResponse:
     """LUD-25 Part 2, Seed & derivation's cx1 registration: claims
     `username` for a WALLET's watch-only branch export (`cx1<P || chain
     code>`), so paying `.well-known/lnurlp/{username}` with no comment
@@ -711,10 +715,12 @@ def upsert_registered_username(username: str, cx1: str, sig: str, npub: str | No
 
     Always proven, never proof-free - even for a fresh, unclaimed
     `username`: `sig` (see _owns_branch) is a required ownership-proof
-    signature over "LNURLcash:register:<username>"
-    (signing.verify_register_signature), so it can never be confused with a
-    note's own `ck1`, another username's proof, or this same username's
-    unregister proof. What it must prove differs by case, though:
+    signature over "LNURLcash:register:<domain>:<username>"
+    (signing.verify_register_signature, `domain` this mint's own resolved
+    host), so it can never be confused with a note's own `ck1`, another
+    username's proof, this same username's unregister proof, or the same
+    proof captured and replayed by a different mint. What it must prove
+    differs by case, though:
     - A fresh claim proves the caller actually controls the `cx1` being
       submitted right now (signed with THAT branch's own index-0 secret
       key).
@@ -758,29 +764,31 @@ def upsert_registered_username(username: str, cx1: str, sig: str, npub: str | No
     # on file instead - see this function's own docstring for why those
     # must differ
     proof_branch_hex = existing_branch_hex if existing_branch_hex is not None else branch.hex()
-    if not _owns_branch("register", username, proof_branch_hex, sig):
+    _, domain = settings.public_base_url_and_host(str(req.base_url))
+    if not _owns_branch("register", domain, username, proof_branch_hex, sig):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid ownership signature.")
     notes.upsert_username(username, branch.hex(), nostr_pubkey_hex)
     return RegisterUsernameResponse()
 
 
 @router.delete("/p/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse)
-def delete_registered_username(username: str, sig: str) -> RegisterUsernameResponse:
+def delete_registered_username(req: Request, username: str, sig: str) -> RegisterUsernameResponse:
     """Frees `username` entirely (NoteStore.delete_username) - it goes back
     to being unclaimed, first-come-first-served for anyone, same as it was
     never registered. `sig`, an ownership-proof signature over
-    "LNURLcash:unregister:<username>" (see _owns_branch) - a different
-    message than upsert_registered_username's own overwrite proof, so one
-    can never be replayed as the other - is mandatory here too: there is
-    no proof-free case for deleting an address someone else may depend
-    on."""
+    "LNURLcash:unregister:<domain>:<username>" (see _owns_branch) - a
+    different message than upsert_registered_username's own overwrite
+    proof, so one can never be replayed as the other - is mandatory here
+    too: there is no proof-free case for deleting an address someone else
+    may depend on."""
     if not settings.username_registration_enabled:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
     username = username.lower()
     existing_branch_hex = notes.username_branch(username)
     if existing_branch_hex is None:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
-    if not _owns_branch("unregister", username, existing_branch_hex, sig):
+    _, domain = settings.public_base_url_and_host(str(req.base_url))
+    if not _owns_branch("unregister", domain, username, existing_branch_hex, sig):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid ownership signature.")
     notes.delete_username(username)
     return RegisterUsernameResponse()

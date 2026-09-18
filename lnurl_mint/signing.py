@@ -218,36 +218,39 @@ def recover_note_pubkey(signature_hex: str) -> bytes:
 # /p/{username}): a WALLET's signature, with the branch's own index-0
 # secret key ("the first secret" - the same key claim_next_index would
 # hand out first, before this ever needed proving), over
-# sha256("LNURLcash:register:<username>") (to overwrite an existing claim)
-# or sha256("LNURLcash:unregister:<username>") (to delete one), per 25.md's
-# Seed & derivation - hashed for the same 32-byte-message reason
-# _schnorr_digest's own docstring gives, `username` being variable-length.
-# Domain-separated from a note's own `ck1` (_CK1_SCHNORR_DIGEST above) so a
-# note's spend/redemption signature can never be replayed here, or vice
-# versa - and binding `action`/`username` into the message itself, rather
-# than one fixed value reused everywhere, stops a signature captured from
-# one overwrite/delete being replayed against a different username on the
-# same branch, or against the other action for that same username.
-def _register_message(action: str, username: str) -> str:
-    return f"{_DOMAIN_TAG}:{action}:{username}"
+# sha256("LNURLcash:register:<domain>:<username>") (to overwrite an
+# existing claim) or sha256("LNURLcash:unregister:<domain>:<username>")
+# (to delete one), per 25.md's Seed & derivation - hashed for the same
+# 32-byte-message reason _schnorr_digest's own docstring gives, `username`
+# being variable-length. Domain-separated from a note's own `ck1`
+# (_CK1_SCHNORR_DIGEST above) so a note's spend/redemption signature can
+# never be replayed here, or vice versa; `action`/`username` fold in so a
+# signature captured from one overwrite/delete can never be replayed
+# against a different username sharing this branch, or against the other
+# action for that same username; and `domain` (the SERVICE's own full
+# domain name, LUD-05 style - router._owns_branch passes the requesting
+# mint's own resolved host) so a proof captured by one mint can never be
+# replayed by it against a different one.
+def _register_message(action: str, domain: str, username: str) -> str:
+    return f"{_DOMAIN_TAG}:{action}:{domain}:{username}"
 
 
-def verify_register_signature(pubkey: bytes, signature_hex: str, action: str, username: str) -> bool:
+def verify_register_signature(pubkey: bytes, signature_hex: str, action: str, domain: str, username: str) -> bool:
     """Whether `signature_hex` is a valid registration ownership-proof
     Schnorr signature by `pubkey` (the branch's own index-0 public key,
     already derived by the caller from the cx1 on file - router._owns_branch)
-    over sha256(_register_message(action, username)). `action` is "register"
-    (upsert_registered_username's overwrite path) or "unregister"
-    (delete_registered_username). Unlike the note-redemption path, there is
-    no legacy fallback here: SERVICE derives `pubkey` itself from `cx1`
-    rather than trusting one embedded in the request, so nothing about this
-    check's shape needed to change for the schnorr switch beyond the
-    signature itself. False (never raises) on a malformed signature."""
+    over sha256(_register_message(action, domain, username)). `action` is
+    "register" (upsert_registered_username's overwrite path) or
+    "unregister" (delete_registered_username). Unlike the note-redemption
+    path, there is no legacy fallback here: SERVICE derives `pubkey` itself
+    from `cx1` rather than trusting one embedded in the request, so nothing
+    about this check's shape needed to change for the schnorr switch beyond
+    the signature itself. False (never raises) on a malformed signature."""
     try:
         signature = bytes.fromhex(signature_hex)
     except ValueError:
         return False
     try:
-        return PublicKeyXOnly(pubkey).verify(signature, _schnorr_digest(_register_message(action, username)))
+        return PublicKeyXOnly(pubkey).verify(signature, _schnorr_digest(_register_message(action, domain, username)))
     except ValueError:
         return False
