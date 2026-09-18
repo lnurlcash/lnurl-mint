@@ -28,6 +28,10 @@ RELAYS = ["wss://relay.example", "wss://nos.example"]
 # this constant/helper for the full rationale (BIP-340 x-only tweak).
 _N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
+# matches conftest.py's BASE_URL ("http://testserver") host - see
+# test_username_registration.py's own copy of this constant.
+_DOMAIN = "testserver"
+
 
 def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action: str, username: str) -> str:
     # signs sha256(message), a 32-byte digest, not the raw message itself -
@@ -40,7 +44,7 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
         derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
     )
     sk0 = PrivateKey.from_int((d + tweak) % _N)
-    digest = sha256(f"LNURLcash:{action}:{username}".encode()).digest()
+    digest = sha256(f"LNURLcash:{action}:{_DOMAIN}:{username}".encode()).digest()
     return sign_schnorr_message(sk0, digest).hex()
 
 

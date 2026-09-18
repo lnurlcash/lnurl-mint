@@ -31,6 +31,11 @@ _N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 # check itself to fail, not FastAPI's own missing-parameter validation.
 _BOGUS_SIG = "00" * 64
 
+# matches conftest.py's BASE_URL ("http://testserver") host - router.py
+# folds settings.public_base_url_and_host(req.base_url)'s host into the
+# signed message (see _ownership_sig), so every proof here must match it.
+_DOMAIN = "testserver"
+
 
 def _branch() -> tuple[PrivateKey, bytes, bytes, str]:
     """A fresh (p, P, chain_code, cx1) - a WALLET's watch-only branch
@@ -45,22 +50,26 @@ def _branch() -> tuple[PrivateKey, bytes, bytes, str]:
     return p, branch_point, chain_code, bech32m.encode_cx1(branch_point + chain_code)
 
 
-def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action: str, username: str) -> str:
+def _ownership_sig(
+    p: PrivateKey, branch_point: bytes, chain_code: bytes, action: str, username: str, domain: str = _DOMAIN
+) -> str:
     """A valid ownership-proof signature (router._owns_branch) for the
     branch (branch_point, chain_code): derive_pubkey tweaks the PUBLIC key
     assuming the even-y (lift_x) representation of `branch_point`, so the
     private-key side must first negate `p`'s scalar whenever `p`'s own
     full pubkey has odd y (PublicKeyXOnly always represents the even-y
     point), then add the same tweak - this recovers sk_0, the branch's
-    own index-0 secret. Signed over "LNURLcash:<action>:<username>" (25.md's
-    Seed & derivation; a different message than a note's own ck1 - see
-    signing.py), a plain BIP-340 Schnorr signature (post "actually use
+    own index-0 secret. Signed over "LNURLcash:<action>:<domain>:<username>"
+    (25.md's Seed & derivation; a different message than a note's own ck1 -
+    see signing.py), a plain BIP-340 Schnorr signature (post "actually use
     schnorr sigs..." - ../luds commit da07aa0), no pk attached since
     SERVICE derives sk0's public half itself from cx1. `action` is
     "register" (a fresh claim OR an overwrite - upsert_registered_username
     checks it against a different branch depending on which) or
     "unregister" (matching delete_registered_username) - the two are never
-    interchangeable. `username` must already be lowercase: the endpoint
+    interchangeable. `domain` (_DOMAIN here, matching the TestClient's own
+    host - see router._owns_branch) stops a proof from replaying against a
+    different mint. `username` must already be lowercase: the endpoint
     lowercases it before ever checking a signature, so a sig signed over a
     mixed-case username would simply never match. Signs sha256(message), a
     32-byte digest, not the raw message itself - see signing._schnorr_digest
@@ -72,7 +81,7 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
         derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
     )
     sk0 = PrivateKey.from_int((d + tweak) % _N)
-    digest = sha256(f"LNURLcash:{action}:{username}".encode()).digest()
+    digest = sha256(f"LNURLcash:{action}:{domain}:{username}".encode()).digest()
     return sign_schnorr_message(sk0, digest).hex()
 
 
@@ -110,6 +119,23 @@ def test_register_claims_a_username(client: TestClient):
     assert notes.username_branch("alice") == bech32m.decode_cx1(cx1).hex()
 
 
+def test_register_rejects_a_proof_signed_for_a_different_domain(client: TestClient):
+    """A proof genuinely signed for some OTHER mint ("other-mint.example")
+    must NOT verify against this one (host "testserver", per _DOMAIN) -
+    the cross-mint replay _owns_branch's own `domain` binding exists to
+    close (a bare cx1/sig pair is otherwise fully portable, and any mint
+    that ever legitimately received one from a WALLET could otherwise
+    replay it verbatim against every other mint's own /p/{username}).
+    settings.public_base_url_and_host deliberately never trusts a
+    request's own Host header for this (see its own docstring), so this
+    signs for a different domain directly rather than spoofing Host."""
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "zoe", domain="other-mint.example")
+    resp = client.post(f"/p/zoe?cx1={cx1}&sig={sig}")
+    assert resp.json()["status"] == "ERROR"
+    assert notes.username_branch("zoe") is None
+
+
 def test_register_and_unregister_proofs_match_lud25_spec_test_vector_2():
     """Cross-implementation check against 25.md's own published "Test
     vector 2: Seed & derivation (branch root has even-y P) + LN address
@@ -119,25 +145,32 @@ def test_register_and_unregister_proofs_match_lud25_spec_test_vector_2():
     branch at index 0). Unlike _ownership_sig's other tests here, which
     only self-check against randomly generated branches, this asserts
     verify_register_signature against the literal signature bytes 25.md
-    publishes - the part that changed with the "32-byte hashed message"
-    fix (../luds commit 6de59b2), since a variable-length username was
-    never 32 bytes to begin with."""
+    publishes - domain-bound since ../luds commit (fix: bind SERVICE
+    domain into the registration proof), since a bare cx1 is otherwise
+    domain-agnostic and a proof over it alone replays against any SERVICE
+    that will accept it, not just the one it was meant for."""
     pk_0 = bytes.fromhex("23bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130")
+    domain = "cash.example.com"
     register_sig = (
-        "baf04336aad76953b437725a6f0b03d295da8792b4d9d36affb8a5d9913df1d5750ed161a8c389f96441711d55306c13a"
-        "3c2362d3542453f7c10f428f1721461"
+        "9d96780fe55f602a9e238a4b2640a9f8ca939cacbbcde109cfd6ba94a6f9d46ff4aaf56ba1e4e72696f7c0e8833445bd1"
+        "94bd06155a133cf524eb587d52e8d22"
     )
     unregister_sig = (
-        "8d7527d0474528770e5c8ac68cc3dbb6841c9e924f78f7d5187d77514c829f781de2a28d3bf9eec9f2ac5439664d215eec"
-        "3915c95b05c1d6cc31cab3c946f068"
+        "7250ab2403333eb5ed73f7a212ac4f35b58f426fe5c2acb8b2194a112881332bfbeebeba0bc4615bcf361bc125d5a4149"
+        "ddbe4b6ea3b755b711fefd8bba58728"
     )
-    assert verify_register_signature(pk_0, register_sig, "register", "alice")
-    assert verify_register_signature(pk_0, unregister_sig, "unregister", "alice")
+    assert verify_register_signature(pk_0, register_sig, "register", domain, "alice")
+    assert verify_register_signature(pk_0, unregister_sig, "unregister", domain, "alice")
 
     # a register proof is never valid as an unregister one (or vice versa)
     # - action is bound into the signed digest, not just checked alongside it
-    assert not verify_register_signature(pk_0, register_sig, "unregister", "alice")
-    assert not verify_register_signature(pk_0, unregister_sig, "register", "alice")
+    assert not verify_register_signature(pk_0, register_sig, "unregister", domain, "alice")
+    assert not verify_register_signature(pk_0, unregister_sig, "register", domain, "alice")
+
+    # nor does either proof replay against a different SERVICE domain -
+    # the bug this vector's own signatures changed to close
+    assert not verify_register_signature(pk_0, register_sig, "register", "mint.example", "alice")
+    assert not verify_register_signature(pk_0, unregister_sig, "unregister", "mint.example", "alice")
 
 
 def test_register_without_a_signature_rejected(client: TestClient):
