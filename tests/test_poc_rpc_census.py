@@ -218,10 +218,11 @@ def test_verify_census_melt_direction(
     node.pay_delay = 0.3
 
     thread = melt_in_background(client, k1, invoice, monkeypatch)
-    # melt_in_background only guarantees mark_pending has fired - give the
-    # background task a moment to actually reach (and start counting) its
-    # own pay_invoice call, deep inside its 0.3s pay_delay sleep, before
-    # establishing the baseline below
+    # melt_in_background guarantees the melts row exists (record_melt has
+    # fired) but not that the background task has reached its own
+    # pay_invoice call - give it a moment to get there (and start
+    # counting), deep inside its 0.3s pay_delay sleep, before establishing
+    # the baseline below
     time.sleep(0.05)
     census.deltas()  # discard whatever accrued getting the melt in flight
 

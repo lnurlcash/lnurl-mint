@@ -277,25 +277,41 @@ def mint_note(client: TestClient, node: FakeNode):
 
 def melt_in_background(client: TestClient, k1: str, pr: str, monkeypatch: pytest.MonkeyPatch) -> threading.Thread:
     """Starts a melt in a background thread and blocks until it has
-    actually marked the note pending, before returning - deterministic,
-    unlike racing a fixed `time.sleep()` against thread startup and
-    request-dispatch overhead, which is exactly the kind of guess that
-    passes reliably on a quiet machine and flakes under load (thread
-    scheduling delay pushing past the sleep before the melt even reaches
-    mark_pending). node.pay_delay (still set by the caller) is what keeps
-    the pending window open long enough afterward for the caller's own
-    concurrent request to observe it - a single TestClient call otherwise
-    blocks until the whole request, background task included, is done, so
-    there is no other way to observe a melt mid-flight."""
+    actually marked the note pending AND recorded its melts row, before
+    returning - deterministic, unlike racing a fixed `time.sleep()`
+    against thread startup and request-dispatch overhead, which is exactly
+    the kind of guess that passes reliably on a quiet machine and flakes
+    under load (thread scheduling delay pushing past the sleep before the
+    melt even reaches mark_pending). Waiting for record_melt on top of
+    mark_pending matters for callers that immediately query
+    /verify/{payment_hash}: the melts row is what keeps that endpoint from
+    404ing, and get_withdraw_callback writes it a few statements AFTER
+    mark_pending - a gap a preempted background thread can lose on a
+    loaded machine, flaking the caller with "Not found" (this was
+    test_verify.py::test_melt_verify_reports_unsettled_while_genuinely_pending
+    failing in CI). record_melt only runs for invoices carrying a payment
+    hash, so that wait is skipped for one without. node.pay_delay (still
+    set by the caller) is what keeps the pending window open long enough
+    afterward for the caller's own concurrent request to observe it - a
+    single TestClient call otherwise blocks until the whole request,
+    background task included, is done, so there is no other way to observe
+    a melt mid-flight."""
     result: dict = {}
     marked_pending = threading.Event()
+    melt_recorded = threading.Event()
     real_mark_pending = notes.mark_pending
+    real_record_melt = notes.record_melt
 
     def _mark_pending_and_signal(note_ids, payment_hash):
         real_mark_pending(note_ids, payment_hash)
         marked_pending.set()
 
+    def _record_melt_and_signal(payment_hash, invoice):
+        real_record_melt(payment_hash, invoice)
+        melt_recorded.set()
+
     monkeypatch.setattr(notes, "mark_pending", _mark_pending_and_signal)
+    monkeypatch.setattr(notes, "record_melt", _record_melt_and_signal)
 
     def melt():
         result["melt"] = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
@@ -303,5 +319,7 @@ def melt_in_background(client: TestClient, k1: str, pr: str, monkeypatch: pytest
     thread = threading.Thread(target=melt)
     thread.start()
     assert marked_pending.wait(timeout=5), "melt never marked the note pending"
+    if bolt11.decode(pr).payment_hash:
+        assert melt_recorded.wait(timeout=5), "melt never recorded its melts row"
     thread.result = result  # type: ignore[attr-defined]
     return thread
