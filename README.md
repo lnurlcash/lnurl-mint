@@ -23,6 +23,7 @@ a reference wallet implementation (hosted at
 | `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb`/`/p/{username}` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
+| `GET /nft/{id}` | **Asset profile**, off by default: the current holder of the note that started as `{id}` - see "Asset profile" below |
 | `GET /.well-known/lnurlw/{username}` | **Theoretical/experimental**: withdraw-side mirror of the LUD-16 address - informational only, see below |
 | `POST /p/{username}` | [LUD-25](../luds/25.md) Part 2: claims `{username}` for a WALLET's own `cx1` branch, so paying its lightning address auto-mints, or overwrites an existing claim's branch/npub wholesale - see "Wallet-side ownership proofs" below |
 | `DELETE /p/{username}` | frees an existing `{username}` claim entirely, back to first-come-first-served - see "Wallet-side ownership proofs" below |
@@ -140,6 +141,18 @@ transferred through the mint, but never paid back out.
   `"split disabled"` / `"merge disabled"` / `"rotate disabled"`. `rotate` alone
   makes every note an indivisible unit whose identity survives each transfer.
   `SUNSET_MINT` keeps its own split rejection on top.
+- `NFT_LOOKUP_ENABLED=true`: serves `GET /nft/{id}`. `{id}` is a genesis note
+  id - the `cp1<pk>` a Part 2 mint was paid with, or a Part 1 mint's hex
+  comment hash. The mint walks its burn records forward to the single
+  outstanding descendant and answers `{"status": "OK", "holder": "<hex id>",
+  "hops": n, "outstanding": true}`; for a `cp1` note `holder` is the holder's
+  x-only public key. With split or merge allowed the walk stops at the first
+  burn with two outputs or two inputs and answers `"holder": null, "reason":
+  "diverged"`. Off by default (404) because it publishes a slice of the
+  ledger the mint otherwise keeps private. The key it shows is a per-note
+  key, not an identity, unless that holder registered a username with
+  `?npub=`.
+
 Together with the existing internal transfers (a holder rotates the note to
 a payee's `cx1`-derived `p1`, no Lightning involved) and
 `MIN_SENDABLE_MSAT = MAX_SENDABLE_MSAT` as a fixed mint price, that is the

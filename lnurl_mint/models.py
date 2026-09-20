@@ -181,6 +181,23 @@ class WithdrawSuccessResponse(BaseModel):
     verify: str | None = None
 
 
+class NftHolderResponse(BaseModel):
+    """GET /nft/{id} (router.get_nft): the current holder of the asset that
+    started life as note `id`. `holder` is the 32-byte hex id of the one
+    outstanding descendant - for a `cp1` mint that is the holder's x-only
+    public key, for a Part 1 mint the hash of its secret; None when the
+    history diverged (a split or a merge, see `reason`). `hops` counts the
+    burns walked to get there. `outstanding` is False once the descendant
+    itself was burned by a melt, in which case `holder` names the last
+    holder."""
+
+    status: Literal["OK"] = "OK"
+    holder: str | None = None
+    hops: int = 0
+    outstanding: bool = False
+    reason: str | None = None
+
+
 class RegisterUsernameResponse(BaseModel):
     """LUD-25 Part 2's cx1 registration (router's POST/DELETE
     /p/{username}) - claims or frees `username` for/from a WALLET's

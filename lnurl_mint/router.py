@@ -25,6 +25,7 @@ from .models import (
     LnurlPayResponse,
     LnurlPayVerifyResponse,
     LnurlWithdrawResponse,
+    NftHolderResponse,
     Nip05Response,
     RegisterUsernameResponse,
     WithdrawSuccessResponse,
@@ -1148,6 +1149,60 @@ async def _verify_response(
     settled = await is_settled(payment_hash)
     preimage = await preimage_of(payment_hash) if settled else None
     return LnurlPayVerifyResponse(settled=settled, preimage=preimage, pr=pr)
+
+
+# an upper bound on how many burns get_nft walks - a chain this long is
+# not a real note's history, it is a request that would otherwise read
+# the whole table one row at a time
+_NFT_MAX_HOPS = 10_000
+
+
+@router.get("/nft/{id}", tags=["lnurlcash"], response_model=NftHolderResponse | LnurlErrorResponse)
+async def get_nft(id: str) -> NftHolderResponse:
+    """Asset profile (see config.py's nft_lookup_enabled): who holds the
+    asset that started life as note `id` now. `id` is a genesis note id in
+    either shape _decode_note_ref accepts - the `cp1<pk>` a Part 2 mint was
+    paid with, or the raw hex `comment` hash of a Part 1 mint - though any
+    note id works as a starting point, not only a genesis one.
+
+    Walks the `burns` table forward (NoteStore.burn_of): every rotate
+    burned exactly one note and minted exactly one, so under
+    `mutations=rotate` the history is a chain and the walk ends at the one
+    outstanding descendant, whose id is the answer. For a `cp1` note that
+    id IS the holder's x-only public key - a per-note key on the holder's
+    branch, not a person, unless that holder chose to register a username
+    and npub here. With split or merge allowed the walk stops at the first
+    burn that had two outputs or two inputs and reports `diverged`: past
+    that point there is no single descendant to name.
+
+    Off by default and 404 while off, same convention as verify_enabled:
+    this deliberately publishes a slice of the ledger the mint otherwise
+    keeps to itself. Never reveals a secret - ids are hashes or public
+    keys, the same values the informational GET /w already accepts by
+    `?p=`."""
+    if not settings.nft_lookup_enabled:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
+    decoded = _decode_note_ref(id)
+    if decoded is None:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "id must be a cp1 public key or a 32-byte hex note id.")
+    note_id, _ = decoded
+    # materializes a paid-but-never-looked-up mint the same way GET /w
+    # would (see _note_amount_by_id), so a genesis id is walkable straight
+    # after settlement
+    if await _note_amount_by_id(note_id) is None and not notes.note_spent(note_id):
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
+    current = note_id
+    hops = 0
+    while hops < _NFT_MAX_HOPS:
+        burn = notes.burn_of(current)
+        if burn is None:
+            return NftHolderResponse(holder=current, hops=hops, outstanding=not notes.note_spent(current))
+        burned, h, h2 = burn
+        if len(burned) > 1 or h2 is not None:
+            return NftHolderResponse(holder=None, hops=hops, outstanding=False, reason="diverged")
+        current = h
+        hops += 1
+    raise HTTPException(HTTPStatus.BAD_REQUEST, "History too long to walk.")
 
 
 @router.get("/verify/{payment_hash}", tags=["lnurlcash"], response_model=LnurlPayVerifyResponse | LnurlErrorResponse)

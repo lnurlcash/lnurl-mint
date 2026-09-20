@@ -447,6 +447,24 @@ class NoteStore:
         ).fetchone()
         return tuple(row) if row else None
 
+    def burn_of(self, note_id: str) -> tuple[list[str], str, str | None] | None:
+        """The burn that consumed `note_id`, as (all note ids burned
+        together, h, h2) - the forward link router.get_nft walks from a
+        genesis note to whoever holds its descendant now. None if
+        `note_id` was never burned by a rotate/split/merge (still
+        outstanding, or gone by melt, which records no burn here). A
+        merge's key is the sorted, '|'-joined set (see _burn_key), so this
+        matches the id in any position; burn keys are exact ids, never
+        substrings of each other, so the LIKE patterns cannot over-match."""
+        row = self.conn.execute(
+            "SELECT burn_key, h, h2 FROM burns"
+            " WHERE burn_key = ? OR burn_key LIKE ? OR burn_key LIKE ? OR burn_key LIKE ?",
+            (note_id, f"{note_id}|%", f"%|{note_id}", f"%|{note_id}|%"),
+        ).fetchone()
+        if row is None:
+            return None
+        return row[0].split("|"), row[1], row[2]
+
     def record_melt(self, payment_hash: str, pr: str) -> None:
         """Record which invoice a melt is paying into, keyed by its
         payment_hash - for LUD-25's melt verify (router.verify_invoice),

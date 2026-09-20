@@ -151,6 +151,17 @@ class Settings(BaseSettings):
     # split rejection applies on top, unchanged.
     mutations: str = "rotate,split,merge"
 
+    # asset profile, part 3 of 3: serve GET /nft/{id} (router.get_nft),
+    # which walks a note's burn history forward from a genesis id to its
+    # single outstanding descendant and names that descendant - for a
+    # public page that shows who currently holds a given asset. This turns
+    # part of the mint's private ledger into public information on
+    # purpose, so it is off by default and 404s while off, same as
+    # verify_enabled. Only useful together with `mutations=rotate`: with
+    # split or merge allowed the walk stops at the first burn that
+    # diverges and says so.
+    nft_lookup_enabled: bool = False
+
     # LUD-21 (optional): serve /verify/{payment_hash} and advertise a
     # `verify` URL in /p/cb's (and a melt's) response, so a wallet with no
     # node of its own can poll whether its invoice settled. Once settled,
