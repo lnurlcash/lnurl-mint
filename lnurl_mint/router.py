@@ -1395,10 +1395,18 @@ async def get_withdraw_callback(
         )
 
     # asset profile (see config.py): a mint that never pays out refuses a
-    # melt before the invoice is decoded - the store is never touched, so
-    # nothing can be reserved by a request the operator turned off.
+    # melt before the invoice is decoded, and one restricted to a subset of
+    # rotate/split/merge refuses the rest before any note is resolved -
+    # neither ever touches the store, so nothing can be burned or reserved
+    # by a request the operator turned off. Classified exactly as 25.md's
+    # own table does: pr is a melt, amount is a split (one or many k1),
+    # several k1 without amount is a merge, one k1 alone is a rotate.
     if pr is not None and not settings.melt_enabled:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "melt disabled")
+    if pr is None:
+        kind = "split" if amount is not None else "merge" if len(k1) > 1 else "rotate"
+        if kind not in settings.allowed_mutations():
+            raise HTTPException(HTTPStatus.BAD_REQUEST, f"{kind} disabled")
 
     # split (amount is not None, since the check above already rejects it
     # alongside pr) grows the number of outstanding notes just like a fresh

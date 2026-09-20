@@ -135,6 +135,11 @@ transferred through the mint, but never paid back out.
   amount), so a wallet that does not know this mint will try to melt and get
   an error. LUD-03 backward compatibility is deliberately given up on such an
   instance. Set `BASE_FEE_MSAT=0` there, since no payout ever needs covering.
+- `MUTATIONS=rotate` (default `rotate,split,merge`): restricts `/w/cb` to a
+  subset. A request outside it is rejected before any note is resolved with
+  `"split disabled"` / `"merge disabled"` / `"rotate disabled"`. `rotate` alone
+  makes every note an indivisible unit whose identity survives each transfer.
+  `SUNSET_MINT` keeps its own split rejection on top.
 Together with the existing internal transfers (a holder rotates the note to
 a payee's `cx1`-derived `p1`, no Lightning involved) and
 `MIN_SENDABLE_MSAT = MAX_SENDABLE_MSAT` as a fixed mint price, that is the

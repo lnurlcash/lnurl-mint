@@ -140,6 +140,17 @@ class Settings(BaseSettings):
     # normal case. On by default.
     melt_enabled: bool = True
 
+    # asset profile, part 2 of 3: which of the three non-melt callbacks
+    # /w/cb accepts, comma-separated from {rotate, split, merge}. The
+    # default allows all three. `rotate` alone makes every note an
+    # indivisible unit whose identity survives each transfer - what a
+    # numbered card or a ticket needs - since split would cut it into
+    # change and merge would fold two into one. A request outside the
+    # allowed set is rejected before any note is resolved, with
+    # {"status": "ERROR", "reason": "<kind> disabled"}. sunset_mint's own
+    # split rejection applies on top, unchanged.
+    mutations: str = "rotate,split,merge"
+
     # LUD-21 (optional): serve /verify/{payment_hash} and advertise a
     # `verify` URL in /p/cb's (and a melt's) response, so a wallet with no
     # node of its own can poll whether its invoice settled. Once settled,
@@ -248,6 +259,22 @@ class Settings(BaseSettings):
                 f"MIN_SENDABLE_MSAT ({self.min_sendable_msat}) exceeds MAX_SENDABLE_MSAT ({self.max_sendable_msat})."
             )
         return self
+
+    @field_validator("mutations")
+    @classmethod
+    def _mutations_are_known(cls, value: str) -> str:
+        """Every entry must be one of the three /w/cb mutations; an empty
+        list is allowed (a mint that only ever mints and melts, or with
+        melt_enabled off, a frozen ledger)."""
+        entries = {entry.strip() for entry in value.split(",") if entry.strip()}
+        unknown = entries - {"rotate", "split", "merge"}
+        if unknown:
+            raise ValueError(f"MUTATIONS has unknown entries {sorted(unknown)}; allowed: rotate, split, merge.")
+        return ",".join(sorted(entries))
+
+    def allowed_mutations(self) -> set[str]:
+        """The parsed `mutations` setting (see its own comment)."""
+        return {entry.strip() for entry in self.mutations.split(",") if entry.strip()}
 
     @field_validator("nostr_key")
     @classmethod
