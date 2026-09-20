@@ -1394,6 +1394,12 @@ async def get_withdraw_callback(
             HTTPStatus.BAD_REQUEST, "pr cannot be combined with multiple k1s or amount - merge or split first."
         )
 
+    # asset profile (see config.py): a mint that never pays out refuses a
+    # melt before the invoice is decoded - the store is never touched, so
+    # nothing can be reserved by a request the operator turned off.
+    if pr is not None and not settings.melt_enabled:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "melt disabled")
+
     # split (amount is not None, since the check above already rejects it
     # alongside pr) grows the number of outstanding notes just like a fresh
     # mint - rejected the same way while sunsetting. rotate/merge/melt are

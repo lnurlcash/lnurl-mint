@@ -125,6 +125,21 @@ class Settings(BaseSettings):
 
     database_path: str = "mint.db"
 
+    # asset profile, part 1 of 3: a mint that never pays out. When off,
+    # /w/cb rejects any request carrying `pr` before the invoice is even
+    # decoded, so mark_pending, _melt_pay, reconcile_pending_melts and melt
+    # verify are never reached. Notes minted here are still LUD-25 notes -
+    # rotate/split/merge, offline certificates and internal transfers all
+    # work - they just can never be turned back into sats: the mint payment
+    # is the operator's income, not a balance held for the holder. This
+    # deliberately gives up LUD-03 backward compatibility (a wallet that
+    # does not know this mint will try to melt and get an error), so an
+    # operator should write down what these notes ARE before inviting
+    # anyone to hold one. Same off-switch convention as verify_enabled;
+    # nothing is advertised while on, since a paying-out mint is the
+    # normal case. On by default.
+    melt_enabled: bool = True
+
     # LUD-21 (optional): serve /verify/{payment_hash} and advertise a
     # `verify` URL in /p/cb's (and a melt's) response, so a wallet with no
     # node of its own can poll whether its invoice settled. Once settled,

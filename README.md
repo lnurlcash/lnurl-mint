@@ -122,6 +122,25 @@ left alone - none of them increases this mint's outstanding liability, and
 holders still need to be able to consolidate and redeem what they already
 have. Off by default.
 
+**Asset profile** (optional, three independent settings, all at their
+non-asset defaults unless set): one instance can issue bearer assets - a
+numbered card, a ticket - that are minted against a Lightning payment,
+transferred through the mint, but never paid back out.
+
+- `MELT_ENABLED=false`: `/w/cb` rejects any request carrying `pr` with
+  `{"status": "ERROR", "reason": "melt disabled"}` before the invoice is
+  decoded, so nothing is reserved or paid. The mint payment is the operator's
+  income, not a balance held for the holder; the note still reports
+  `maxWithdrawable` (the draft has no other value slot, and `cs1` signs the
+  amount), so a wallet that does not know this mint will try to melt and get
+  an error. LUD-03 backward compatibility is deliberately given up on such an
+  instance. Set `BASE_FEE_MSAT=0` there, since no payout ever needs covering.
+Together with the existing internal transfers (a holder rotates the note to
+a payee's `cx1`-derived `p1`, no Lightning involved) and
+`MIN_SENDABLE_MSAT = MAX_SENDABLE_MSAT` as a fixed mint price, that is the
+whole profile. Artwork or any other payload stays outside LUD-25; a signed
+catalogue keyed by genesis id is the usual answer.
+
 **Offline verification** (optional): if a funding source is configured, `GET
 /w` advertises a `mintPubkey` - that node's own identity, the same key
 it signs BOLT-11 invoices with - and rotate/split/merge responses carry a
