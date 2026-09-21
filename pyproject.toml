@@ -30,6 +30,10 @@ dependencies = [
 # `uv sync --extra spark` / `uv pip install '.[spark]'`
 [project.optional-dependencies]
 spark = ["breez-sdk-spark>=0.23.0,<0.24"]
+# LUD-25 `ct1` taproot note locks (lnurl_mint/ct1.py): script-path redemption
+# is verified by Bitcoin Core's own interpreter. Without it the mint refuses
+# ct1 outputs (it could never open them) - everything else is unaffected.
+ct1 = ["lnurlcash-kernel>=0.0.5"]
 
 [dependency-groups]
 dev = [

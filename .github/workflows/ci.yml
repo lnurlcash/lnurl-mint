@@ -46,7 +46,7 @@ jobs:
           python-version: "3.10"
 
       - name: Install python dependencies
-        run: uv sync --locked --dev
+        run: uv sync --locked --dev --extra ct1
 
       # the /docs assets are gitignored, fetched at build time - the docs
       # tests need them present (see scripts/fetch_swagger_ui.py)

@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 import bolt11
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 
-from . import bech32m, derivation
+from . import bech32m, ct1, derivation
 from . import nostr as nostr_module
 from .config import settings
 from .db import OutputCollisionError, PendingNoteError, notes
@@ -457,6 +457,9 @@ def _note_id_from_k1(k1: str) -> tuple[str, bool] | None:
     those have aged out."""
     if HEX32_PATTERN.match(k1):
         return _note_id(k1), False
+    cw1_id = _note_id_from_cw1(k1)
+    if cw1_id is not None:
+        return cw1_id, True
     decoded = bech32m.decode_ck1(k1)
     if decoded is not None:
         pubkey, signature = decoded
@@ -470,6 +473,45 @@ def _note_id_from_k1(k1: str) -> tuple[str, bool] | None:
         return None
 
 
+def _note_id_from_cw1(k1: str) -> str | None:
+    """The id (Q, hex) of the ct1 note that the `cw1` script-path spend `k1`
+    legitimately opens, or None if `k1` isn't a cw1 or doesn't open anything:
+    the revealed leaf must derive to a Q this mint recorded AS a ct1 lock, and
+    Bitcoin Core's script interpreter (lnurlcashkernel) must accept it for that
+    note's amount, the redeemer's signed locktime/sequence being acceptable at
+    this mint's own clock (see ct1.py). Only the note's existence is looked up
+    here, not its spendability - _resolve_note asks that next, exactly as for a
+    ck1 - so a retried burn (find_burn) can still be recognised."""
+    spend = ct1.parse_cw1(k1)
+    if spend is None:
+        return None
+    note_id = ct1.derive_output_key(spend.script, spend.control_block)
+    if note_id is None:
+        return None
+    locked = notes.ct1_note(note_id.hex())
+    if locked is None:
+        return None
+    amount_msat, locked_at = locked
+    return note_id.hex() if ct1.verify(spend, note_id.hex(), amount_msat, locked_at) else None
+
+
+async def _materialize_cw1(k1s: list[str]) -> None:
+    """A ct1 note minted straight from a comment only exists as a settled mint
+    until something asks about it (see _note_amount_by_id); a cw1 can't name
+    its note before its leaf is derived, so materialize it first, or the
+    synchronous _note_id_from_cw1 lookup would miss it."""
+    for k1 in k1s:
+        spend = ct1.parse_cw1(k1)
+        if spend is not None:
+            note_id = ct1.derive_output_key(spend.script, spend.control_block)
+            if note_id is not None:
+                await _note_amount_by_id(note_id.hex())
+
+
+def _is_ct1_ref(value: str) -> bool:
+    return ct1.available() and bech32m.decode_ct1(value) is not None
+
+
 def _decode_note_ref(value: str) -> tuple[str, bool] | None:
     """(32-byte note id hex, is a `cp1` pubkey) that `value` names, whether
     given as a raw legacy hash or a `cp1<pk>` public key (Part 2's
@@ -480,6 +522,10 @@ def _decode_note_ref(value: str) -> tuple[str, bool] | None:
     if HEX32_PATTERN.match(value):
         return value, False
     pubkey = bech32m.decode_cp1(value)
+    if pubkey is None and ct1.available():
+        # a ct1 output key is registered exactly like a cp1 pubkey (same id
+        # space, same certificate); callers ask _is_ct1_ref for the flag
+        pubkey = bech32m.decode_ct1(value)
     return (pubkey.hex(), True) if pubkey is not None else None
 
 
@@ -1090,7 +1136,14 @@ async def _pay_callback(
     # pays); the note it produces is credited net of the mint fee.
     payment_hash = sha256(preimage).hexdigest() if preimage is not None else _created_invoice_payment_hash(pr)
     try:
-        notes.create_mint(payment_hash, pr, net_amount_msat, comment_hash, zap_request=zap_request)
+        notes.create_mint(
+            payment_hash,
+            pr,
+            net_amount_msat,
+            comment_hash,
+            zap_request=zap_request,
+            comment_ct1=comment is not None and decoded_comment is not None and _is_ct1_ref(comment),
+        )
     except ValueError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
     # built from settings, not req.url_for (which is Host-header-derived,
@@ -1282,6 +1335,7 @@ async def get_withdraw(
 
     is_cp1 = False
     if k1 is not None:
+        await _materialize_cw1([k1])
         id_info = _note_id_from_k1(k1)
         resolved = None
         if id_info is not None:
@@ -1437,6 +1491,7 @@ async def get_withdraw_callback(
         # a replay, and still needs to reach that same error - so this only
         # short-circuits when every field matches. Each k1 (mixed legacy/ck1
         # freely, per spec) is dispatched independently by _note_id_from_k1.
+        await _materialize_cw1(k1)
         resolved_ids = [_note_id_from_k1(note_k1) for note_k1 in k1]
         if all(r is not None for r in resolved_ids):
             burn = notes.find_burn([r[0] for r in resolved_ids if r is not None])
@@ -1453,6 +1508,7 @@ async def get_withdraw_callback(
                     )
                     return WithdrawSuccessResponse(sig=sig, sig2=sig2)
 
+    await _materialize_cw1(k1)
     note_ids: list[str] = []
     values: list[int] = []
     for note_k1 in k1:
@@ -1564,7 +1620,12 @@ async def get_withdraw_callback(
             # p1_id/p2_id are validated present and well-formed above,
             # whenever pr is None and amount is not - both true here
             assert p1_id is not None and p2_id is not None
-            notes.swap(note_ids, [p1_id, p2_id], [amount, change_amount])
+            notes.swap(
+                note_ids,
+                [p1_id, p2_id],
+                [amount, change_amount],
+                [_is_ct1_ref(p1 or ""), _is_ct1_ref(p2 or "")],
+            )
             funding_source = settings.funding_source()
             return WithdrawSuccessResponse(
                 sig=await _certificate(p1_id, amount, p1_is_cp1, funding_source),
@@ -1579,7 +1640,7 @@ async def get_withdraw_callback(
         assert p1_id is not None  # validated above, whenever pr is None
         refund = (len(note_ids) - 1) * settings.base_fee_msat
         merged_amount = total_msat + refund
-        notes.swap(note_ids, [p1_id], [merged_amount])
+        notes.swap(note_ids, [p1_id], [merged_amount], [_is_ct1_ref(p1 or "")])
         return WithdrawSuccessResponse(
             sig=await _certificate(p1_id, merged_amount, p1_is_cp1, settings.funding_source())
         )

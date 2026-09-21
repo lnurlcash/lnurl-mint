@@ -153,7 +153,7 @@ a note may be keyed by a public key instead of a hash, spent by a
 recoverable signature instead of a revealed preimage - purely additive on
 top of everything above, a `SERVICE`/`WALLET` implementing only Part 1
 interoperates fully with one that also implements this. Four bech32m
-(BIP-350) encodings, each fitting the exact same fields Part 1 already
+(BIP-350) encodings (plus the optional `ct1`/`cw1` pair), each fitting the exact same fields Part 1 already
 uses:
 
 - **`cp1<pk>`** - a note's 32-byte x-only public key, in place of a hash-
@@ -177,6 +177,20 @@ uses:
   `GET /w?p=<cp1<pk>>` too, so a holder (or a third party checking a note
   by its public key alone, without ever seeing its spend secret) can
   verify it without contacting this mint at all.
+- **`ct1<Q>` / `cw1<...>`** (optional, `uv sync --extra ct1`) - a `cp1` whose
+  32-byte key `Q` is a BIP-341 taproot *output* key: redeemable by the same
+  `ck1` key-path signature, or by a `cw1` script-path spend (a revealed leaf
+  script, control block and witness) - e.g. a CSV/CLTV timelock leaf. `ct1`
+  goes wherever `cp1` does; `cw1` goes wherever `ck1` does. Only notes
+  registered as `ct1` accept a `cw1`. The revealed leaf is checked against
+  the stored `Q` (unused leaves stay private) and executed by Bitcoin Core's
+  own script interpreter (`lnurlcashkernel`, unmodified). Time is this mint's
+  own assertion, never a proof: the `cw1` carries the redeemer's *signed*
+  `nLockTime`/`nSequence`, and the mint accepts them only if its own clock
+  agrees (Unix-time CLTV and BIP-68 time-type CSV only, the latter measured
+  from when this mint recorded the note; block heights/counts are refused).
+  Without the extra installed, `ct1` outputs are refused outright rather than
+  accepted and stranded.
 - **`cx1<P || chain_code>`** - a WALLET's watch-only export of its whole
   derivation branch for this mint (non-hardened, so every note's public
   key is computable from `cx1` alone, never its private key) - see below.
