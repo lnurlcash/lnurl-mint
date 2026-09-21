@@ -15,7 +15,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest@sha256:2d890623d310b57771ce840f0da5eed5f
 
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-cache --no-install-project
+RUN uv sync --frozen --no-dev --extra ct1 --no-cache --no-install-project
 
 
 # Stage 2: Python runtime - no uv, no compilers, just the venv built above

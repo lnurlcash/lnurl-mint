@@ -129,6 +129,14 @@ class NoteStore:
             # `comment_hash` on `mints` - existing rows predate it entirely,
             # so they get NULL, same as any mint that skipped it
             self._add_column_if_missing(self._conn, "mints", "comment_hash", "TEXT")
+            # LUD-25 ct1 (taproot script-path locks): whether a note is a ct1
+            # lock (redeemable by a cw1 too, not only a ck1) and when this
+            # mint first recorded it - the reference point for a CSV leaf.
+            # Older rows predate ct1, so 0 is correct: never script-path
+            # redeemable.
+            self._add_column_if_missing(self._conn, "notes", "ct1", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(self._conn, "notes", "locked_at", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(self._conn, "mints", "comment_ct1", "INTEGER NOT NULL DEFAULT 0")
             # a database from before mark_melt_settled has no `settled` on
             # `melts` - existing rows predate it entirely; router._melt_settled
             # falls back to a live is_payment_complete check whenever this is
@@ -170,6 +178,7 @@ class NoteStore:
         amount_msat: int,
         comment_hash: str | None = None,
         zap_request: str | None = None,
+        comment_ct1: bool = False,
     ) -> None:
         """Record an invoice whose preimage will become a bearer note worth
         `amount_msat` once the invoice settles (see settle_mint). Only the
@@ -199,9 +208,9 @@ class NoteStore:
                 if collision:
                     raise ValueError("comment already in use")
             self.conn.execute(
-                "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash, zap_request, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (payment_hash, pr, amount_msat, comment_hash, zap_request, int(time.time())),
+                "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash, zap_request, created_at, comment_ct1)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (payment_hash, pr, amount_msat, comment_hash, zap_request, int(time.time()), int(comment_ct1)),
             )
 
     def pending_zap_mints(self, created_since: int, limit: int) -> list[str]:
@@ -293,12 +302,25 @@ class NoteStore:
             if cursor.rowcount != 1:
                 return None
             row = self.conn.execute(
-                "SELECT amount_msat, comment_hash FROM mints WHERE payment_hash = ?", (payment_hash,)
+                "SELECT amount_msat, comment_hash, comment_ct1 FROM mints WHERE payment_hash = ?", (payment_hash,)
             ).fetchone()
-            amount_msat, comment_hash = row
+            amount_msat, comment_hash, comment_ct1 = row
             note_id = comment_hash if comment_hash is not None else payment_hash
-            self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
+            self.conn.execute(
+                "INSERT INTO notes (id, amount_msat, ct1, locked_at) VALUES (?, ?, ?, ?)",
+                (note_id, amount_msat, comment_ct1, int(time.time())),
+            )
             return amount_msat
+
+    def ct1_note(self, note_id: str) -> tuple[int, int] | None:
+        """(amount_msat, locked_at) of the note `note_id` IF it was issued as a
+        ct1 lock - spent or not, so a retried burn can still be recognised
+        (spendability is note_amount's question). None for any other note:
+        a cw1 script-path spend is only ever valid against a ct1 note."""
+        row = self.conn.execute(
+            "SELECT amount_msat, locked_at FROM notes WHERE id = ? AND ct1 = 1", (note_id,)
+        ).fetchone()
+        return (row[0], row[1]) if row else None
 
     def note_amount(self, note_id: str) -> int | None:
         """Value of the outstanding (unspent) note with id `note_id`
@@ -346,7 +368,13 @@ class NoteStore:
         row = self.conn.execute("SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
         return bool(row and row[0])
 
-    def swap(self, burn_ids: list[str], mint_note_ids: list[str], mint_amounts: list[int]) -> None:
+    def swap(
+        self,
+        burn_ids: list[str],
+        mint_note_ids: list[str],
+        mint_amounts: list[int],
+        mint_ct1: list[bool] | None = None,
+    ) -> None:
         """Atomically burn every note in `burn_ids` and mint one fresh note
         per (id, amount) in zip(mint_note_ids, mint_amounts). Per LUD-25,
         `mint_note_ids` are hashes the WALLET itself generated and
@@ -407,8 +435,13 @@ class NoteStore:
 
                     for note_id in burn_ids:
                         self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
-                    for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
-                        self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
+                    ct1_flags = mint_ct1 if mint_ct1 is not None else [False] * len(mint_note_ids)
+                    locked_at = int(time.time())
+                    for note_id, amount_msat, is_ct1 in zip(mint_note_ids, mint_amounts, ct1_flags):
+                        self.conn.execute(
+                            "INSERT INTO notes (id, amount_msat, ct1, locked_at) VALUES (?, ?, ?, ?)",
+                            (note_id, amount_msat, int(is_ct1), locked_at),
+                        )
                     self.conn.execute(
                         "INSERT INTO burns (burn_key, h, h2, amount1_msat, amount2_msat) VALUES (?, ?, ?, ?, ?)",
                         (

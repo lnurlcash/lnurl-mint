@@ -80,6 +80,11 @@ def _fixed_length_codec(hrp: str, length: int) -> tuple:
 # commitment, in place of Part 1's hash-of-preimage.
 encode_cp1, decode_cp1 = _fixed_length_codec("cp", 32)
 
+# ct1<Q>: same payload shape as cp1 - a 32-byte x-only key - but Q is a BIP-341
+# taproot OUTPUT key, and the HRP is the capability flag "a cw1 script-path
+# spend is also accepted for this note" (see ct1.py).
+encode_ct1, decode_ct1 = _fixed_length_codec("ct", 32)
+
 
 # ck1<pk><sig>: a 32-byte BIP-340 x-only public key concatenated with a
 # 64-byte Schnorr signature (96 bytes total) - the bearer secret for a cp1
