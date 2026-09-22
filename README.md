@@ -191,6 +191,18 @@ uses:
   from when this mint recorded the note; block heights/counts are refused).
   Without the extra installed, `ct1` outputs are refused outright rather than
   accepted and stranded.
+
+  A `cw1` that names a real, still-locked note but fails Core's own check
+  (script not yet satisfiable - a timelock not yet reached, an unsupported
+  leaf shape, a bad witness, ...) is refused with that *specific* reason,
+  not the generic "Invalid or already spent k1." every other unresolved
+  `k1` gets. This is deliberately more revealing than that generic case:
+  unlike a legacy hash preimage or a `ck1` signature, a `cw1` already
+  discloses its entire secret in the request itself, so explaining exactly
+  why it failed can't help anyone guess at a *different*, still-hidden
+  one. A `cw1` that doesn't match any locked note at all stays in the
+  ordinary ambiguous bucket (never existed vs. already spent - genuinely
+  indistinguishable, same as any other unresolved `k1`).
 - **`cx1<P || chain_code>`** - a WALLET's watch-only export of its whole
   derivation branch for this mint (non-hardened, so every note's public
   key is computable from `cx1` alone, never its private key) - see below.

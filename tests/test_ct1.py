@@ -102,6 +102,58 @@ def test_cltv_leaf_refused_before_locktime_and_burns_nothing(client, node, mint_
     assert notes.note_amount(vector["output_key"]) == vector["amount_msat"]
 
 
+def test_cltv_rejection_names_the_specific_reason_not_a_generic_one(client, node, mint_note, monkeypatch):
+    """A cw1 that legitimately names a real, still-locked note, but whose
+    own script conditions the mint's clock hasn't cleared yet, must say so
+    specifically - never collapse into the same "invalid or already spent"
+    wording a wrong or already-burned secret gets (see router.py's own
+    _cw1_rejection_reason): those are genuinely different situations, and a
+    cw1 discloses its whole secret already, so there's nothing unsafe about
+    being specific here."""
+    vector = BY_NAME["cltv"]
+    _lock(client, mint_note, vector)
+    _at(monkeypatch, vector["locktime"] - 1)
+
+    response = _redeem(client, vector["cw1"])
+    assert _refused(response)
+    reason = response.json()["reason"]
+    assert "future" in reason
+    assert "already spent" not in reason.lower()
+    assert notes.note_amount(vector["output_key"]) == vector["amount_msat"]  # never burned
+
+
+def test_informational_get_also_names_the_specific_cw1_rejection_reason(client, node, mint_note, monkeypatch):
+    vector = BY_NAME["cltv"]
+    _lock(client, mint_note, vector)
+    _at(monkeypatch, vector["locktime"] - 1)
+
+    response = client.get(f"/w?k1={vector['cw1']}")
+    assert _refused(response)
+    reason = response.json()["reason"]
+    assert "future" in reason
+    assert reason != "Unknown note."
+
+
+def test_cw1_matching_no_locked_note_stays_ambiguous(client, node, monkeypatch):
+    """Unlike a genuinely actionable rejection, a cw1 whose derived output
+    key simply isn't locked to any note here must stay in the same
+    ambiguous bucket a wrong or already-burned legacy k1 does - it may
+    never have existed, or may already be spent, and the mint can't (and
+    shouldn't try to) tell those apart."""
+    vector = BY_NAME["pk"]
+    _at(monkeypatch, vector["now"])
+    response = _redeem(client, vector["cw1"])
+    assert _refused(response)
+    assert response.json()["reason"] == "Invalid or already spent k1."
+
+
+def test_cw1_shaped_value_without_the_kernel_says_so_specifically(client, node, monkeypatch):
+    monkeypatch.setattr(ct1, "kernel", None)
+    response = _redeem(client, "cw1" + "q" * 20)
+    assert _refused(response)
+    assert "does not support ct1" in response.json()["reason"]
+
+
 def test_csv_leaf_refused_before_maturity(client, node, mint_note, monkeypatch):
     vector = BY_NAME["csv"]
     _lock(client, mint_note, vector)

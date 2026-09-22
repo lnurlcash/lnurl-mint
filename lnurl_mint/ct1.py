@@ -66,8 +66,15 @@ def parse_cw1(k1: str):
     return kernel.decode_cw1(k1) if kernel is not None and k1[:3].lower() == "cw1" else None
 
 
-def verify(spend, note_id_hex: str, amount_msat: int, locked_at: int) -> bool:
-    """Does `spend` (a decoded cw1) legitimately open the ct1 note `note_id_hex`?"""
+def verify(spend, note_id_hex: str, amount_msat: int, locked_at: int) -> str | None:
+    """None if `spend` (a decoded cw1) legitimately opens the ct1 note
+    `note_id_hex` - otherwise the exact reason lnurlcashkernel rejected it,
+    e.g. "locktime 1800000000 is in the future (now 1699999999)" or "leaf
+    script is not a supported shape". Safe to disclose to whoever submitted
+    `spend`: unlike a legacy hash preimage or a ck1 signature, a cw1
+    reveals its ENTIRE secret in the request itself - there is nothing left
+    for an explanation to help anyone guess at a still-hidden one. See
+    router.py's _note_id_from_cw1, the one caller, for how this is used."""
     assert kernel is not None
     try:
         kernel.verify_spend(
@@ -81,6 +88,6 @@ def verify(spend, note_id_hex: str, amount_msat: int, locked_at: int) -> bool:
             now=int(time.time()),
             locked_at=locked_at,
         )
-    except kernel.SpendRejected:
-        return False
-    return True
+    except kernel.SpendRejected as exc:
+        return str(exc)
+    return None
