@@ -457,7 +457,7 @@ def _note_id_from_k1(k1: str) -> tuple[str, bool] | None:
     those have aged out."""
     if HEX32_PATTERN.match(k1):
         return _note_id(k1), False
-    cw1_id = _note_id_from_cw1(k1)
+    cw1_id, _cw1_reason = _note_id_from_cw1(k1)
     if cw1_id is not None:
         return cw1_id, True
     decoded = bech32m.decode_ck1(k1)
@@ -473,26 +473,50 @@ def _note_id_from_k1(k1: str) -> tuple[str, bool] | None:
         return None
 
 
-def _note_id_from_cw1(k1: str) -> str | None:
-    """The id (Q, hex) of the ct1 note that the `cw1` script-path spend `k1`
-    legitimately opens, or None if `k1` isn't a cw1 or doesn't open anything:
-    the revealed leaf must derive to a Q this mint recorded AS a ct1 lock, and
-    Bitcoin Core's script interpreter (lnurlcashkernel) must accept it for that
-    note's amount, the redeemer's signed locktime/sequence being acceptable at
-    this mint's own clock (see ct1.py). Only the note's existence is looked up
-    here, not its spendability - _resolve_note asks that next, exactly as for a
-    ck1 - so a retried burn (find_burn) can still be recognised."""
+def _note_id_from_cw1(k1: str) -> tuple[str | None, str | None]:
+    """(note id, None) if the `cw1` script-path spend `k1` legitimately
+    opens a ct1 note this mint has locked. Otherwise (None, reason):
+    `reason` is None when `k1` isn't a cw1 at all, or derives to SOME
+    output key but this mint has no outstanding note locked under it -
+    genuinely ambiguous (never existed vs. already spent), same privacy
+    posture as any other k1 that fails to resolve - and is the SPECIFIC,
+    actionable rejection text otherwise (this mint lacks ct1 support, a
+    malformed control block, an unsupported leaf shape, a locktime not yet
+    reached, ...). Always safe to disclose that text: a cw1 reveals its
+    whole secret in the request itself already (see ct1.verify's own
+    note), so explaining exactly why it failed can't help anyone guess at
+    a DIFFERENT, still-hidden secret the way it could for a plain hash or
+    a signature.
+
+    Only the note's existence/well-formedness is checked here, not general
+    spendability - _resolve_note asks that next, exactly as for a ck1 - so
+    a retried burn (find_burn) can still be recognised."""
+    if not ct1.available() and k1[:3].lower() == "cw1":
+        return None, "This mint does not support ct1 script-path redemption."
     spend = ct1.parse_cw1(k1)
     if spend is None:
-        return None
+        return None, None
     note_id = ct1.derive_output_key(spend.script, spend.control_block)
     if note_id is None:
-        return None
+        return None, "This cw1's control block does not commit to a valid taproot output key."
     locked = notes.ct1_note(note_id.hex())
     if locked is None:
-        return None
+        return None, None
     amount_msat, locked_at = locked
-    return note_id.hex() if ct1.verify(spend, note_id.hex(), amount_msat, locked_at) else None
+    reason = ct1.verify(spend, note_id.hex(), amount_msat, locked_at)
+    return (None, reason) if reason is not None else (note_id.hex(), None)
+
+
+def _cw1_rejection_reason(k1: str) -> str | None:
+    """The specific reason _note_id_from_cw1 refused `k1`, if it has one -
+    called only right before an endpoint would otherwise fall back to its
+    own generic "invalid"/"unknown" wording, so a genuinely actionable cw1
+    failure (wrong shape, script not satisfied yet, ...) is never
+    swallowed into that ambiguous catch-all. None whenever `k1` isn't a
+    cw1, or the failure genuinely is that same "could be either" ambiguity
+    (see _note_id_from_cw1's own docstring) - the caller's existing
+    wording already covers those correctly."""
+    return _note_id_from_cw1(k1)[1]
 
 
 async def _materialize_cw1(k1s: list[str]) -> None:
@@ -1359,6 +1383,9 @@ async def get_withdraw(
     if resolved is None:
         if already_spent:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Note already spent.")
+        cw1_reason = _cw1_rejection_reason(k1) if k1 is not None else None
+        if cw1_reason is not None:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, cw1_reason)
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown note.")
     note_id, amount_msat = resolved
     # a note reserved by an in-flight melt (NoteStore.mark_pending) must
@@ -1514,6 +1541,9 @@ async def get_withdraw_callback(
     for note_k1 in k1:
         resolved = await _resolve_note(note_k1)
         if resolved is None:
+            cw1_reason = _cw1_rejection_reason(note_k1)
+            if cw1_reason is not None:
+                raise HTTPException(HTTPStatus.BAD_REQUEST, cw1_reason)
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid or already spent k1.")
         note_ids.append(resolved[0])
         values.append(resolved[1])
