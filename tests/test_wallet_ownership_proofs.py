@@ -1,7 +1,7 @@
-"""LUD-25 Part 2 (25.md): Wallet-side ownership proofs + Offline verification
-for `cp1` notes - mint via comment=cp1<pk>, redeem via k1=ck1<pk><sig>, and
-the cs1 certificates issued alongside rotate/split/merge and the
-informational GET."""
+"""LUD-25 key-path notes (25.md): mint via comment=cp1<Q>, redeem via
+k1=ck1<Q><sig> - a signature over the canonical spend transaction's sighash
+for this mint's domain - and the cs1 certificates issued alongside
+rotate/split/merge and the informational GET."""
 
 from hashlib import sha256
 from os import urandom
@@ -11,45 +11,30 @@ from fastapi.testclient import TestClient
 
 from lnurl_mint import bech32m
 from lnurl_mint.signing import lightning_signed_message_digest
-from tests.conftest import FakeNode, sign_schnorr_message
-
-# ck1 signs sha256("LNURLcash"), a 32-byte digest, not the raw 9-byte string
-# (see signing._CK1_SCHNORR_DIGEST) - most conforming Schnorr signers only
-# accept a 32-byte message.
-_CK1_MESSAGE = b"LNURLcash"
-_CK1_DIGEST = sha256(_CK1_MESSAGE).digest()
+from tests.conftest import FakeNode, ck1_for, k1_id, sign_schnorr_message
 
 
 def _note_keypair() -> tuple[PrivateKey, str]:
-    """A fresh (sk, cp1<pk>) pair for a Part 2 note, the way a real WALLET
-    would generate one (see 25.md's Wallet-side ownership proofs)."""
+    """A fresh (sk, cp1<Q>) pair for a key-path note, the way a real WALLET
+    would generate one (see 25.md's Key-path notes)."""
     sk = PrivateKey()
     pk_xonly = sk.public_key.format(compressed=True)[1:]
     return sk, bech32m.encode_cp1(pk_xonly)
 
 
-def _ck1(sk: PrivateKey) -> str:
-    """The bearer secret for a note owned by `sk` - a BIP-340 Schnorr
-    signature over the one fixed digest every ck1 signs, per Encoding,
-    with `sk`'s own x-only pubkey travelling alongside it."""
-    pk_xonly = sk.public_key.format(compressed=True)[1:]
-    sig = sign_schnorr_message(sk, _CK1_DIGEST)
-    return bech32m.encode_ck1(pk_xonly, sig)
+_ck1 = ck1_for
 
 
 def test_ck1_matches_lud25_spec_test_vector_3():
-    """Cross-implementation check against 25.md's own published "Test
-    vector 3: Wallet-side ownership proof (ck1)" - lnurl-wallet's kit
-    (src/lib/specVectors.test.ts) asserts the exact same numbers. sk_0/pk_0
-    here are Test Vector 1's, per 25.md."""
+    """Cross-implementation check against 25.md's own "Test vector 3:
+    Key-path spend (ck1)": sk_0/pk_0 from Test Vector 1, at mint.example."""
     sk = PrivateKey(bytes.fromhex("944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f"))
     assert sk.public_key.format(compressed=True)[1:].hex() == (
         "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634"
     )
-    assert _CK1_DIGEST.hex() == "49a9bb7cae28a0c1f77bc7fac7693456b1cc149f83c413acfd938dc95ea21cf5"
-    assert _ck1(sk) == (
-        "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc62s0003psm2kxx7p8dsal9arwd7e6usu04cjens0"
-        "qhywer99jc5sz9zqptmg4gyjlgg2zpglhl8atjj6zsfsh5ffnzn4k73naafcukpgdezzqx"
+    assert _ck1(sk, "mint.example") == (
+        "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6g8wlplczy60g4e5wp3dyyz6xr07fpse9flp0fy50"
+        "cg4a4w64av6eprdctjlan6cu9dt38re9nu08etk5w3dmknlhuxzwcm3ycjysw3c9dpmpy"
     )
 
 
@@ -86,10 +71,29 @@ def test_informational_get_includes_cs1_certificate(client: TestClient, node: Fa
     assert recovered.format(compressed=True).hex() == node.pubkey
 
 
-def test_legacy_note_informational_get_has_no_sig(client: TestClient, mint_note):
+def test_bearer_note_informational_get_includes_cs1_too(client: TestClient, node: FakeNode, mint_note):
+    """Every note is a taproot output key, so a bearer note - minted and
+    redeemed in its hex short forms - gets a cs1 certificate over its Q
+    exactly like a key-path note."""
     k1 = mint_note(5000)
     data = client.get(f"/w?k1={k1}").json()
-    assert "sig" not in data
+    amount_msat, sig = bech32m.decode_cs1(data["sig"])
+    assert amount_msat == 5000
+    digest = lightning_signed_message_digest(f"LNURLcash:{amount_msat}:{k1_id(k1)}")
+    recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
+    assert recovered.format(compressed=True).hex() == node.pubkey
+
+
+def test_ck1_signed_for_another_domain_is_rejected(client: TestClient, node: FakeNode):
+    """A ck1 signs the canonical spend transaction for one mint's domain:
+    one this mint never answers on is a replay from elsewhere."""
+    sk, cp1 = _mint_cp1_note(client, node, 5000)
+    foreign = _ck1(sk, "other.example")
+    assert client.get(f"/w?k1={foreign}").json() == {"status": "ERROR", "reason": "Unknown note."}
+    _, new_cp1 = _note_keypair()
+    data = client.get(f"/w/cb?k1={foreign}&p1={new_cp1}").json()
+    assert data == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+    assert client.get(f"/w?k1={_ck1(sk)}").json()["maxWithdrawable"] == 5000
 
 
 def test_recovery_scan_finds_a_note_via_p_equals_cp1(client: TestClient, node: FakeNode):
@@ -244,17 +248,30 @@ def test_legacy_ck1_still_redeems_a_cp1_note(client: TestClient, node: FakeNode)
     assert client.get(f"/w?k1={new_k1}").json()["maxWithdrawable"] == 5000
 
 
-def _raw_message_ck1(sk: PrivateKey) -> str:
+def _fixed_message_ck1(sk: PrivateKey, message: bytes) -> str:
     """TODO(deprecated, remove once no such notes are expected to remain in
-    the wild): the current pk||sig shape, but signed over the raw 9-byte
-    "LNURLcash" string instead of sha256("LNURLcash") - the scheme in
-    effect before the "32-byte hashed message" change (../luds commit
-    6de59b2). Built the way a not-yet-upgraded WALLET still would, so tests
-    can confirm the mint still honors it during the transition (see
-    signing.verify_ck1_signature's own fallback)."""
+    the wild): the current Q||sig shape, but signed over a fixed message
+    instead of the spend transaction's sighash - sha256("LNURLcash"), and
+    before that the raw 9-byte string. Built the way a not-yet-upgraded
+    WALLET still would, so tests can confirm the mint still honors it
+    during the transition (see signing.verify_legacy_ck1)."""
     pk_xonly = sk.public_key.format(compressed=True)[1:]
-    sig = sign_schnorr_message(sk, b"LNURLcash")
-    return bech32m.encode_ck1(pk_xonly, sig)
+    return bech32m.encode("ck", pk_xonly + sign_schnorr_message(sk, message))
+
+
+def _raw_message_ck1(sk: PrivateKey) -> str:
+    return _fixed_message_ck1(sk, b"LNURLcash")
+
+
+def test_hashed_message_ck1_still_redeems_a_cp1_note(client: TestClient, node: FakeNode):
+    """TODO(deprecated): a ck1 signed over sha256("LNURLcash"), the scheme
+    just before spends moved onto the transaction sighash."""
+    sk, cp1 = _mint_cp1_note(client, node, 5000)
+    old_k1 = _fixed_message_ck1(sk, sha256(b"LNURLcash").digest())
+    assert client.get(f"/w?k1={old_k1}").json()["maxWithdrawable"] == 5000
+    new_sk, new_cp1 = _note_keypair()
+    assert client.get(f"/w/cb?k1={old_k1}&p1={new_cp1}").json()["status"] == "OK"
+    assert client.get(f"/w?k1={_ck1(new_sk)}").json()["maxWithdrawable"] == 5000
 
 
 def test_raw_message_ck1_still_redeems_a_cp1_note(client: TestClient, node: FakeNode):

@@ -129,17 +129,19 @@ def test_pay_callback_one_create_invoice_per_call_stateful_bloat(client: TestCli
 def test_withdraw_info_census(client: TestClient, node: FakeNode, mint_note, census: RpcCensus):
     # case 1: first /w on a settled-but-not-yet-materialized mint k1:
     # 1 is_invoice_settled (lazy settlement) + 1 fetch_node_info (mint_pubkey)
+    # + 1 sign_message (every note's cs1 certificate, LUD-25)
     k1 = mint_note(10_000)
     census.deltas()  # discard /p/cb's own create_invoice
     assert client.get(f"/w?k1={k1}").status_code == 200
-    assert census.deltas() == {"is_invoice_settled": 1, "fetch_node_info": 1}
+    assert census.deltas() == {"is_invoice_settled": 1, "fetch_node_info": 1, "sign_message": 1}
 
     # case 2: same note again - now materialized locally, so the settlement
     # probe is gone, but mint_pubkey (signing.py L30-48) has NO cache:
-    # still exactly 1 getinfo-class RPC per request, forever.
+    # still exactly 1 getinfo-class RPC per request, forever - plus the
+    # certificate, re-signed per request (deterministic, RFC6979).
     for _ in range(3):
         assert client.get(f"/w?k1={k1}").status_code == 200
-        assert census.deltas() == {"fetch_node_info": 1}
+        assert census.deltas() == {"fetch_node_info": 1, "sign_message": 1}
 
     # case 3: /w on an *unsettled* pending mint's k1 (the preimage is only
     # learnable by the payer, but the shape matters for the census): the

@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 import bolt11
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 
-from . import bech32m, ct1, derivation
+from . import bech32m, derivation, spend
 from . import nostr as nostr_module
 from .config import settings
 from .db import OutputCollisionError, PendingNoteError, notes
@@ -39,16 +39,10 @@ from .node import (
     pay_invoice,
     payment_preimage,
 )
-from .signing import mint_pubkey, recover_note_pubkey, sign_note, verify_ck1_signature, verify_register_signature
+from .signing import mint_pubkey, sign_note, verify_register_signature
 
 router = APIRouter()
 router.route_class = LnurlErrorResponseHandler
-
-# a sha256 digest, hex-encoded - every k1 this mint ever issues (a payment
-# preimage or a WALLET-generated secret) is exactly this shape, and so,
-# per LUD-25, is p1/p2 (a hash rather than a secret, but the same 32 raw
-# bytes long) - anything else can be rejected before touching the database
-HEX32_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _funding_source() -> LightningBackendConfig:
@@ -260,13 +254,6 @@ async def reconcile_pending_melts(funding_source: LightningBackendConfig) -> Non
             logging.info("reconcile: melt %s confirmed not paid at boot - restored", note_ids)
 
 
-def _note_id(k1: str) -> str:
-    """A note's storage id: sha256 over the raw k1 bytes - for a minted
-    note (k1 = payment preimage) this is exactly the payment hash of the
-    invoice that funded it, and it's all the store ever persists."""
-    return sha256(bytes.fromhex(k1)).hexdigest()
-
-
 def _created_invoice_payment_hash(pr: str) -> str:
     """The payment hash of an invoice this mint just created, read off
     the invoice itself - only reached for backends that cannot know the
@@ -417,15 +404,10 @@ async def _melt_preimage(payment_hash: str) -> str | None:
 async def _note_amount_by_id(note_id: str) -> int | None:
     """Value of the outstanding note with id `note_id`, or None - either it
     was never minted, or it has already been spent (rotated/split/merged/
-    melted away).
-
-    Tries `note_id` first as a mint payment hash (the ordinary, no-comment
-    case, where a note's id IS its funding invoice's payment hash), then as
-    a LUD-25 comment_hash (_mint_settled_by_comment) - the case for any
-    comment-protected mint, where the two are unrelated. Harmless either
-    way when `note_id` doesn't match either: _mint_settled itself only
-    ever matches a real payment hash, so trying it against a comment_hash
-    just costs one extra, cheap, local lookup."""
+    melted away). Materializes a note whose mint invoice has settled but
+    that nothing has asked about yet (see NoteStore.settle_mint), by the
+    comment it was minted under, or - for a mint from before comment
+    protection was mandatory - its payment hash."""
     amount_msat = notes.note_amount(note_id)
     if amount_msat is not None:
         return amount_msat
@@ -436,152 +418,60 @@ async def _note_amount_by_id(note_id: str) -> int | None:
     return None
 
 
-def _note_id_from_k1(k1: str) -> tuple[str, bool] | None:
-    """(note id, is a `cp1` note) that `k1` identifies, regardless of shape -
-    a legacy hex secret hashes to its id (Part 1's plain bearer notes), a
-    `ck1<pk><sig>` value names its id directly via its own embedded `pk`,
-    once its Schnorr signature checks out (Part 2's Wallet-side ownership
-    proofs). There is only ever the one `ck1` per note - the same value
-    used both to redeem it and, informationally, to prove authenticity
-    (see 25.md's Encoding) - so this single dispatch covers both
-    router.get_withdraw and router.get_withdraw_callback. None if `k1` is
-    neither shape, or a `ck1` whose signature doesn't verify. Doesn't touch
-    the store; see _resolve_note for that.
-
-    TODO(deprecated): also accepts the pre-schnorr `ck1` shape - a bare
-    65-byte recoverable signature with no embedded pk, recovered via
-    ecrecover instead of verified (bech32m.decode_ck1_legacy,
-    signing.recover_note_pubkey) - so notes minted before the schnorr
-    switch (../luds commit da07aa0) remain redeemable during the
-    transition. Remove this fallback, and the two symbols above, once
-    those have aged out."""
-    if HEX32_PATTERN.match(k1):
-        return _note_id(k1), False
-    cw1_id, _cw1_reason = _note_id_from_cw1(k1)
-    if cw1_id is not None:
-        return cw1_id, True
-    decoded = bech32m.decode_ck1(k1)
-    if decoded is not None:
-        pubkey, signature = decoded
-        return (pubkey.hex(), True) if verify_ck1_signature(pubkey, signature) else None
-    legacy_signature = bech32m.decode_ck1_legacy(k1)
-    if legacy_signature is None:
-        return None
-    try:
-        return recover_note_pubkey(legacy_signature.hex()).hex(), True
-    except ValueError:
-        return None
+async def _materialize(note_id: str, legacy_id: str | None) -> None:
+    """Brings the note `note_id` on file if it exists at all: settles its
+    mint if that was paid but never asked about, and moves a bearer note
+    issued before notes were keyed by Q from its old id `legacy_id` (see
+    NoteStore.migrate_legacy_note)."""
+    if legacy_id is not None:
+        await _note_amount_by_id(legacy_id)
+        notes.migrate_legacy_note(legacy_id, note_id)
+    await _note_amount_by_id(note_id)
 
 
-def _note_id_from_cw1(k1: str) -> tuple[str | None, str | None]:
-    """(note id, None) if the `cw1` script-path spend `k1` legitimately
-    opens a ct1 note this mint has locked. Otherwise (None, reason):
-    `reason` is None when `k1` isn't a cw1 at all, or derives to SOME
-    output key but this mint has no outstanding note locked under it -
-    genuinely ambiguous (never existed vs. already spent), same privacy
-    posture as any other k1 that fails to resolve - and is the SPECIFIC,
-    actionable rejection text otherwise (this mint lacks ct1 support, a
-    malformed control block, an unsupported leaf shape, a locktime not yet
-    reached, ...). Always safe to disclose that text: a cw1 reveals its
-    whole secret in the request itself already (see ct1.verify's own
-    note), so explaining exactly why it failed can't help anyone guess at
-    a DIFFERENT, still-hidden secret the way it could for a plain hash or
-    a signature.
+class _Rejected(Exception):
+    """A k1 that names no note, or doesn't open the one it names. `reason`
+    is safe to hand back (see spend.verify)."""
 
-    Only the note's existence/well-formedness is checked here, not general
-    spendability - _resolve_note asks that next, exactly as for a ck1 - so
-    a retried burn (find_burn) can still be recognised."""
-    if not ct1.available() and k1[:3].lower() == "cw1":
-        return None, "This mint does not support ct1 script-path redemption."
-    spend = ct1.parse_cw1(k1)
-    if spend is None:
-        return None, None
-    note_id = ct1.derive_output_key(spend.script, spend.control_block)
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+_INVALID_K1 = "Invalid or already spent k1."
+
+
+async def _verified_note(k1: str) -> tuple[str, int, bool, bool]:
+    """(note id, value, spent, pending) of the note `k1` spends, once the
+    spend is verified to open it (spend.verify) - spent notes included, so a
+    retried burn can still be recognised. Raises _Rejected otherwise: with
+    the generic invalid-k1 reason when `k1` is no spend or names no note on
+    file (never existed and already spent stay indistinguishable here), or
+    a script path's own specific reason."""
+    parsed = spend.parse(k1)
+    if parsed is None:
+        raise _Rejected(_INVALID_K1)
+    await _materialize(parsed.note_id, parsed.legacy_hash)
+    record = notes.note_record(parsed.note_id)
+    if record is None:
+        raise _Rejected(_INVALID_K1)
+    amount_msat, locked_at, spent, pending = record
+    reason = spend.verify(parsed, locked_at, settings.spend_domains())
+    if reason is not None:
+        raise _Rejected(reason)
+    return parsed.note_id, amount_msat, spent, pending
+
+
+async def _note_by_ref(value: str) -> str | None:
+    """The note id `value` names where a `cp1` goes (?p=, and every other
+    cp1-shaped input): a `cp1`, or a bearer note's hex `h` - migrating a
+    note stored under that `h` itself first (see _materialize). None if
+    `value` is neither."""
+    note_id = spend.decode_note(value)
     if note_id is None:
-        return None, "This cw1's control block does not commit to a valid taproot output key."
-    locked = notes.ct1_note(note_id.hex())
-    if locked is None:
-        return None, None
-    amount_msat, locked_at = locked
-    reason = ct1.verify(spend, note_id.hex(), amount_msat, locked_at)
-    return (None, reason) if reason is not None else (note_id.hex(), None)
-
-
-def _cw1_rejection_reason(k1: str) -> str | None:
-    """The specific reason _note_id_from_cw1 refused `k1`, if it has one -
-    called only right before an endpoint would otherwise fall back to its
-    own generic "invalid"/"unknown" wording, so a genuinely actionable cw1
-    failure (wrong shape, script not satisfied yet, ...) is never
-    swallowed into that ambiguous catch-all. None whenever `k1` isn't a
-    cw1, or the failure genuinely is that same "could be either" ambiguity
-    (see _note_id_from_cw1's own docstring) - the caller's existing
-    wording already covers those correctly."""
-    return _note_id_from_cw1(k1)[1]
-
-
-async def _materialize_cw1(k1s: list[str]) -> None:
-    """A ct1 note minted straight from a comment only exists as a settled mint
-    until something asks about it (see _note_amount_by_id); a cw1 can't name
-    its note before its leaf is derived, so materialize it first, or the
-    synchronous _note_id_from_cw1 lookup would miss it."""
-    for k1 in k1s:
-        spend = ct1.parse_cw1(k1)
-        if spend is not None:
-            note_id = ct1.derive_output_key(spend.script, spend.control_block)
-            if note_id is not None:
-                await _note_amount_by_id(note_id.hex())
-
-
-def _is_ct1_ref(value: str) -> bool:
-    return ct1.available() and bech32m.decode_ct1(value) is not None
-
-
-def _decode_note_ref(value: str) -> tuple[str, bool] | None:
-    """(32-byte note id hex, is a `cp1` pubkey) that `value` names, whether
-    given as a raw legacy hash or a `cp1<pk>` public key (Part 2's
-    Wallet-side ownership proofs) - both are just "an id to register a new
-    note under" as far as this store is concerned: LUD-12 `comment` on
-    /p/cb (Minting), and `p1`/`p2` on /w/cb (Rotate/split/merge output).
-    None if `value` is neither shape."""
-    if HEX32_PATTERN.match(value):
-        return value, False
-    pubkey = bech32m.decode_cp1(value)
-    if pubkey is None and ct1.available():
-        # a ct1 output key is registered exactly like a cp1 pubkey (same id
-        # space, same certificate); callers ask _is_ct1_ref for the flag
-        pubkey = bech32m.decode_ct1(value)
-    return (pubkey.hex(), True) if pubkey is not None else None
-
-
-async def _resolve_note(k1: str) -> tuple[str, int] | None:
-    """(id, value) of the outstanding note whose bearer secret is `k1`."""
-    resolved = _note_id_from_k1(k1)
-    if resolved is None:
         return None
-    note_id, _ = resolved
-    amount_msat = await _note_amount_by_id(note_id)
-    return (note_id, amount_msat) if amount_msat is not None else None
-
-
-async def _resolve_note_by_hash(h: str) -> tuple[str, int] | None:
-    """(id, value) of the outstanding note whose id is literally `h` -
-    LUD-25's "Checking a note without exposing it" (router.get_withdraw's
-    `p` query param) - accepting either a raw legacy hash or a `cp1<pk>`
-    public key (Part 2's Wallet-side ownership proofs; see
-    _decode_note_ref), both are just "the note id" as far as this lookup
-    is concerned. This is what a WALLET's recovery scan uses too (25.md's
-    Seed & derivation: re-derive `pk_0, pk_1, ...` and GET `?p=cp1<pk_i>`
-    for each), so rejecting the `cp1<...>` shape here would make that scan
-    never find a note it should. Unlike _resolve_note, no hashing happens
-    here: `h` already *is* (or decodes to) the note id this store keys
-    every note by internally, so this is just _note_amount_by_id with the
-    same not-found handling _resolve_note gives a raw k1."""
-    decoded = _decode_note_ref(h)
-    if decoded is None:
-        return None
-    note_id, _ = decoded
-    amount_msat = await _note_amount_by_id(note_id)
-    return (note_id, amount_msat) if amount_msat is not None else None
+    await _materialize(note_id, spend.legacy_hash(value))
+    return note_id
 
 
 def _mint_fee_msat(amount_msat: int) -> int:
@@ -717,7 +607,7 @@ def _known_username(username: str) -> bool:
 # NoteStore.upsert_username) and every lookup site can just lowercase its
 # own input to match - short
 # enough to stay a reasonable Lightning Address local-part. Deliberately
-# excludes anything HEX32_PATTERN/bech32m would also match - no registered
+# excludes anything 64-hex/bech32m would also match - no registered
 # username can ever be confused for a k1/comment/p1 value on another
 # endpoint.
 _USERNAME_PATTERN = re.compile(r"^[a-z0-9_.-]{1,32}$")
@@ -1060,21 +950,14 @@ async def _pay_callback(
     resolved and lowercased by the caller - see that function's own
     docstring for why the split exists).
 
-    `comment` (LUD-12) is LUD-25's comment protection (Protecting a freshly
-    minted note from a preimage race): a WALLET sends a bare hex-encoded
-    32-byte hash here, committing to a `secret` only it knows, and once
-    this invoice settles the resulting note is credited as `k1=<secret>`
-    instead of the payment preimage (see settle_mint) - the preimage then
+    `comment` (LUD-12) names the note to credit, per LUD-25's Minting: a
+    `cp1<Q>` the WALLET generated, or a bearer note's hex `h` (the short
+    form - see spend.decode_note), and once this invoice settles the note
+    is credited at that Q (see settle_mint). The payment preimage then
     redeems nothing, closing the race a routing node forwarding this
-    invoice would otherwise win by learning the preimage itself. `comment`
-    is exactly that shape (or,
-    per Part 2's Wallet-side ownership proofs, `cp1<pk>` - see
-    _decode_note_ref); one of any other shape never falls back to a
-    preimage-keyed note, since a preimage-keyed note is only as safe as
-    the paying node's honesty about forwarding it: a WALLET or route hop
-    could otherwise observe the preimage before settlement completes and
-    steal the note. Without a registered branch there is no other key to
-    mint under, so a comment of any other shape is rejected outright.
+    invoice would otherwise win by learning it. A comment of any other
+    shape never falls back to a preimage-keyed note: without a registered
+    branch there is no other key to mint under, so it is rejected outright.
 
     `comment` is REQUIRED for the fixed identity (`branch` is None), same
     as ever - but for a registered username it becomes OPTIONAL: when
@@ -1119,10 +1002,11 @@ async def _pay_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, problem)
         zap_request = nostr
 
-    decoded_comment = _decode_note_ref(comment) if comment is not None else None
-    if decoded_comment is not None:
-        comment_hash, _ = decoded_comment
-    elif branch is not None:
+    comment_hash = spend.decode_note(comment) if comment is not None else None
+    # a bearer note's hex `h` may still name a note stored under that `h`
+    # itself (see NoteStore.migrate_legacy_note) - reserved just the same
+    legacy_id = spend.legacy_hash(comment) if comment_hash is not None and comment is not None else None
+    if comment_hash is None and branch is not None:
         # registered username: a comment that isn't a note ref (a payer's
         # WALLET sending an ordinary human LUD-12 message, or nothing at
         # all - e.g. a zap) doesn't block minting - auto-mint on this
@@ -1132,11 +1016,11 @@ async def _pay_callback(
         comment_hash, _ = notes.claim_next_index(
             username, lambda i: derivation.derive_pubkey(branch_point, chain_code, i).hex()
         )
-    else:
+    elif comment_hash is None:
         raise HTTPException(
             HTTPStatus.BAD_REQUEST,
-            "Missing or malformed comment: a hex-encoded 32-byte hashed secret, "
-            "or a cp1<pubkey>, is required to mint.",
+            "Missing or malformed comment: a cp1<Q>, or a bearer note's hex-encoded "
+            "32-byte hash, is required to mint.",
         )
     funding_source = _funding_source()
     try:
@@ -1152,7 +1036,7 @@ async def _pay_callback(
     # is sha256(preimage); the spark backend cannot - its SSP generates
     # and holds the preimage (see spark.py's module docstring) - and
     # returns None instead, so there the hash is read straight off the
-    # invoice itself. The preimage never becomes the bearer secret now
+    # invoice itself. The preimage never becomes a note's spend now
     # that comment protection is mandatory, and is discarded here, per
     # the spec's storing-hashes-not-secrets guidance - only the payment
     # hash and the invoice itself (for LUD-21 verify) are stored. The
@@ -1166,7 +1050,7 @@ async def _pay_callback(
             net_amount_msat,
             comment_hash,
             zap_request=zap_request,
-            comment_ct1=comment is not None and decoded_comment is not None and _is_ct1_ref(comment),
+            also_reserved=(legacy_id,) if legacy_id is not None else (),
         )
     except ValueError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
@@ -1280,20 +1164,14 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
 
 
-async def _certificate(
-    note_id_hex: str, amount_msat: int, is_cp1: bool, funding_source: LightningBackendConfig
-) -> str | None:
-    """This mint's Offline-verification signature over a note - `cs1<...>`
-    (bech32m, LUD-25 Part 2) for a `cp1` note, or the existing raw-hex
-    signature for a legacy Part 1 note, unchanged (Part 1 never adopted
-    bech32m - see 25.md's own "no new encoding" framing for it). Both cases
-    share the exact same message/digest (see signing._message); only the
-    wire encoding of sign_note's output differs. None if signing isn't
-    available right now (see sign_note)."""
+async def _certificate(note_id_hex: str, amount_msat: int, funding_source: LightningBackendConfig) -> str | None:
+    """This mint's Offline-verification certificate for a note, `cs1<...>`
+    over (Q, amount) - every note has a public Q, so every note gets one.
+    None if signing isn't available right now (see sign_note)."""
     raw = await sign_note(note_id_hex, amount_msat, funding_source)
     if raw is None:
         return None
-    return bech32m.encode_cs1(amount_msat, bytes.fromhex(raw)) if is_cp1 else raw
+    return bech32m.encode_cs1(amount_msat, bytes.fromhex(raw))
 
 
 @router.get("/w", tags=["lnurlcash"], response_model=LnurlWithdrawResponse | LnurlErrorResponse)
@@ -1311,19 +1189,20 @@ async def get_withdraw(
     minWithdrawable == maxWithdrawable states the note's value
     authoritatively.
 
-    Exactly one of `k1`/`p` must be given. With `k1`, the response's `k1`
-    MUST echo the literal secret it was queried with - never a derived or
-    opaque identifier - so a wallet can copy it verbatim into a new note
-    URL or the callback.
+    Exactly one of `k1`/`p` must be given. With `k1` - a `ck1`, a `cw1`, or
+    a bearer note's hex preimage - the spend is verified in full against
+    its note first (see _verified_note), per LUD-25, so a WALLET checking a
+    received note learns whether its spend actually opens it; a script
+    path's own failure reason (a timelock not yet due, ...) is passed on.
+    The response's `k1` MUST echo the literal value it was queried with, so
+    a wallet can copy it verbatim into a new note URL or the callback.
 
-    `p` (LUD-25's "Checking a note without exposing it") is the hex sha256
-    of `k1`, accepted here in place of it and ONLY here, never at /w/cb -
-    this store already keys every note by that same hash internally, so
-    it's just a second way in for a lookup it can already do. The response
-    then omits `k1` (see LnurlWithdrawResponse): the convenience that field
-    normally serves doesn't apply to a caller who queried by hash, since it
-    already holds the raw k1. An unknown `p` gets the same response as an unknown `k1`. A retained
-    spent hash returns "Note already spent." with either lookup form.
+    `p` (LUD-25's "Checking a note without exposing it") is the note's
+    `cp1`, or a bearer note's hex `h`, accepted here in place of `k1` and
+    ONLY here, never at /w/cb. The response then omits `k1` (see
+    LnurlWithdrawResponse). An unknown `p` gets the same response as an
+    unknown `k1`; a retained spent note returns "Note already spent." with
+    either lookup form.
 
     `h` is `p`'s old name, kept purely for backwards compatibility with a
     WALLET built against a pre-rename mint (see this codebase's own history
@@ -1342,52 +1221,34 @@ async def get_withdraw(
     via this endpoint's callback (rotate/split/merge, which have no
     invoice) do.
 
-    `sig` (Part 2 Offline verification) is additionally included whenever
-    the query identifies a `cp1` note - either `k1` was a `ck1` signature,
-    or `p` was the note's own `cp1<pk>` - a ready-made `cs1` certificate for
-    it, so a WALLET need not force a rotate just to obtain one, and a
-    recovery scan (`_resolve_note_by_hash`'s own docstring) gets one for
-    free while probing `?p=cp1<pk_i>`. A certificate isn't a spend
-    authorization - just this mint's signature over (pubkey, amount) - so
-    unlike redemption itself, handing one out never requires proof the
-    caller holds the note's private key. Omitted for a legacy Part 1 `k1`
-    or `p`: those identify a note by a plain hash, which was never signed
-    with a `cp1` certificate to begin with."""
+    `sig` (LUD-25 Offline verification) is a ready-made `cs1` certificate
+    for the note, so a WALLET need not force a rotate just to obtain one,
+    and a recovery scan probing `?p=cp1<pk_i>` gets one for free. A
+    certificate isn't a spend authorization - just this mint's signature
+    over (Q, amount) - so handing one out for `p` never requires proof the
+    caller holds the note's spend."""
     p = p if p is not None else h
     if (k1 is None) == (p is None):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Specify exactly one of k1 or p.")
 
-    is_cp1 = False
     if k1 is not None:
-        await _materialize_cw1([k1])
-        id_info = _note_id_from_k1(k1)
-        resolved = None
-        if id_info is not None:
-            note_id, is_cp1 = id_info
-            amount_msat = await _note_amount_by_id(note_id)
-            resolved = (note_id, amount_msat) if amount_msat is not None else None
-        already_spent = bool(id_info and notes.note_spent(id_info[0]))
+        try:
+            note_id, amount_msat, spent, _ = await _verified_note(k1)
+        except _Rejected as exc:
+            reason = exc.reason if exc.reason != _INVALID_K1 else "Unknown note."
+            raise HTTPException(HTTPStatus.BAD_REQUEST, reason)
     else:
         assert p is not None
-        resolved = await _resolve_note_by_hash(p)
-        # The hash (or cp1 pubkey) already identifies the note: disclose
-        # its spent state, while keeping the spending secret off the wire.
-        p_decoded = _decode_note_ref(p)
-        already_spent = bool(p_decoded and notes.note_spent(p_decoded[0]))
-        # p itself names a cp1 pubkey (or doesn't) independently of any
-        # ownership proof - a cs1 certificate is just this mint's signature
-        # over (pubkey, amount), not a spend authorization, so it's exactly
-        # as safe to hand out here as it is for a ck1 lookup.
-        is_cp1 = bool(p_decoded and p_decoded[1])
-
-    if resolved is None:
-        if already_spent:
-            raise HTTPException(HTTPStatus.BAD_REQUEST, "Note already spent.")
-        cw1_reason = _cw1_rejection_reason(k1) if k1 is not None else None
-        if cw1_reason is not None:
-            raise HTTPException(HTTPStatus.BAD_REQUEST, cw1_reason)
-        raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown note.")
-    note_id, amount_msat = resolved
+        ref = await _note_by_ref(p)
+        record = notes.note_record(ref) if ref is not None else None
+        if ref is None or record is None:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown note.")
+        note_id = ref
+        amount_msat, _, spent, _ = record
+    # a note names its own spent state: disclosed, while keeping the spend
+    # itself off the wire
+    if spent:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Note already spent.")
     # a note reserved by an in-flight melt (NoteStore.mark_pending) must
     # not be advertised as withdrawable: every mutating callback rejects
     # it with reason "pending" per spec, so an informational endpoint
@@ -1401,7 +1262,7 @@ async def get_withdraw(
     # spoofable via a plain Host header even behind a proxy) - same as
     # get_lnaddress/get_pay_callback
     base, host = settings.public_base_url_and_host(str(req.base_url))
-    sig = await _certificate(note_id, amount_msat, True, settings.funding_source()) if is_cp1 else None
+    sig = await _certificate(note_id, amount_msat, settings.funding_source())
     return LnurlWithdrawResponse(
         callback=f"{base}/w/cb",
         k1=k1,
@@ -1483,70 +1344,66 @@ async def get_withdraw_callback(
     if settings.sunset_mint and amount is not None:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "This mint is sunsetting - splitting is disabled.")
 
-    # checked before any note is resolved, so an invalid/missing hash never
-    # burns anything. p1/p2 accept either a raw legacy hash or a `cp1<pk>`
-    # public key (Part 2's Wallet-side ownership proofs) - see
-    # _decode_note_ref; p1_is_cp1/p2_is_cp1 track which, so the eventual
-    # sig/sig2 can be encoded as `cs1<...>` for a cp1 output, unchanged raw
-    # hex for a legacy one (see _certificate).
+    # checked before any note is resolved, so an invalid/missing output
+    # never burns anything. p1/p2 are the WALLET-generated notes to credit:
+    # a `cp1<Q>`, or a bearer note's hex `h` (see spend.decode_note)
     p1_id: str | None = None
-    p1_is_cp1 = False
     p2_id: str | None = None
-    p2_is_cp1 = False
     if pr is None:
-        p1_decoded = _decode_note_ref(p1) if p1 is not None else None
-        if p1_decoded is None:
+        p1_id = spend.decode_note(p1) if p1 is not None else None
+        if p1_id is None:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "missing p1")
-        p1_id, p1_is_cp1 = p1_decoded
         if amount is not None:
-            p2_decoded = _decode_note_ref(p2) if p2 is not None else None
-            if p2_decoded is None:
+            p2_id = spend.decode_note(p2) if p2 is not None else None
+            if p2_id is None:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, "missing p2")
-            p2_id, p2_is_cp1 = p2_decoded
 
+    # every k1 is verified against its note once, spent or not (see
+    # _verified_note) - notes of any kind mix freely in one request, per spec
+    verified: list[tuple[str, int, bool, bool]] = []
+    for note_k1 in k1:
+        try:
+            verified.append(await _verified_note(note_k1))
+        except _Rejected as exc:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, exc.reason)
+    note_ids = [note_id for note_id, _, _, _ in verified]
+
+    if pr is None:
         # LUD-25 "Retrying a mutation": a rotate/split/merge is a GET that
         # mutates state once and only ever wants to say so once - an HTTP
         # client's own timeout-retry, a proxy in between, or a flaky
         # connection resending a request it never saw a reply for must see
         # that same original result again, not "already spent" for a note
-        # this mint itself just burned. Checked here, before any k1 is
-        # resolved (a burned note fails that resolution from here on), so a
-        # genuine replay never falls through to the ordinary already-spent
-        # error below. Only an EXACT match (the same k1 set, p1, p2 and
-        # amount as some earlier completed burn) counts as a replay; these
-        # same k1s under a different p1/p2/amount is a genuine conflict, not
-        # a replay, and still needs to reach that same error - so this only
-        # short-circuits when every field matches. Each k1 (mixed legacy/ck1
-        # freely, per spec) is dispatched independently by _note_id_from_k1.
-        await _materialize_cw1(k1)
-        resolved_ids = [_note_id_from_k1(note_k1) for note_k1 in k1]
-        if all(r is not None for r in resolved_ids):
-            burn = notes.find_burn([r[0] for r in resolved_ids if r is not None])
-            if burn is not None:
-                recorded_p1, recorded_p2, amount1_msat, amount2_msat = burn
-                recorded_amount = amount1_msat if recorded_p2 is not None else None
-                if recorded_p1 == p1_id and recorded_p2 == p2_id and recorded_amount == amount:
-                    funding_source = settings.funding_source()
-                    sig = await _certificate(recorded_p1, amount1_msat, p1_is_cp1, funding_source)
-                    sig2 = (
-                        await _certificate(recorded_p2, amount2_msat, p2_is_cp1, funding_source)
-                        if recorded_p2 is not None and amount2_msat is not None
-                        else None
-                    )
-                    return WithdrawSuccessResponse(sig=sig, sig2=sig2)
+        # this mint itself just burned. Only an EXACT match (the same set of
+        # burned notes, p1, p2 and amount as some earlier completed burn)
+        # counts as a replay; these same notes under a different p1/p2/amount
+        # is a genuine conflict, not a replay, and still reaches the ordinary
+        # already-spent error below. Matched on note ids (Q), never the raw
+        # k1 strings: one note may be opened by more than one valid spend.
+        burn = notes.find_burn(note_ids)
+        if burn is not None:
+            recorded_p1, recorded_p2, amount1_msat, amount2_msat = burn
+            recorded_amount = amount1_msat if recorded_p2 is not None else None
+            if recorded_p1 == p1_id and recorded_p2 == p2_id and recorded_amount == amount:
+                funding_source = settings.funding_source()
+                sig = await _certificate(recorded_p1, amount1_msat, funding_source)
+                sig2 = (
+                    await _certificate(recorded_p2, amount2_msat, funding_source)
+                    if recorded_p2 is not None and amount2_msat is not None
+                    else None
+                )
+                return WithdrawSuccessResponse(sig=sig, sig2=sig2)
+        # a bearer note's hex `h` may still name a note stored under that
+        # `h` itself (see NoteStore.migrate_legacy_note): crediting a second
+        # note for the same secret is a collision like any other
+        for ref in (p1, p2):
+            legacy_id = spend.legacy_hash(ref) if ref is not None else None
+            if legacy_id is not None and notes.id_in_use(legacy_id):
+                raise HTTPException(HTTPStatus.BAD_REQUEST, "Output already in use.")
 
-    await _materialize_cw1(k1)
-    note_ids: list[str] = []
-    values: list[int] = []
-    for note_k1 in k1:
-        resolved = await _resolve_note(note_k1)
-        if resolved is None:
-            cw1_reason = _cw1_rejection_reason(note_k1)
-            if cw1_reason is not None:
-                raise HTTPException(HTTPStatus.BAD_REQUEST, cw1_reason)
-            raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid or already spent k1.")
-        note_ids.append(resolved[0])
-        values.append(resolved[1])
+    if any(spent for _, _, spent, _ in verified):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, _INVALID_K1)
+    values = [amount_msat for _, amount_msat, _, _ in verified]
     total_msat = sum(values)
 
     if pr is not None:
@@ -1589,7 +1446,7 @@ async def get_withdraw_callback(
         except ValueError as exc:
             # a note resolved fine above but lost a race with a concurrent
             # request before it could be reserved - same known-safe message
-            # _resolve_note itself uses, not an internal error
+            # _verified_note itself uses, not an internal error
             raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
 
         # registered the moment the reservation lands - BEFORE the response
@@ -1650,16 +1507,11 @@ async def get_withdraw_callback(
             # p1_id/p2_id are validated present and well-formed above,
             # whenever pr is None and amount is not - both true here
             assert p1_id is not None and p2_id is not None
-            notes.swap(
-                note_ids,
-                [p1_id, p2_id],
-                [amount, change_amount],
-                [_is_ct1_ref(p1 or ""), _is_ct1_ref(p2 or "")],
-            )
+            notes.swap(note_ids, [p1_id, p2_id], [amount, change_amount])
             funding_source = settings.funding_source()
             return WithdrawSuccessResponse(
-                sig=await _certificate(p1_id, amount, p1_is_cp1, funding_source),
-                sig2=await _certificate(p2_id, change_amount, p2_is_cp1, funding_source),
+                sig=await _certificate(p1_id, amount, funding_source),
+                sig2=await _certificate(p2_id, change_amount, funding_source),
             )
 
         # rotate is a merge of one note - the refund below is exactly 0
@@ -1670,18 +1522,14 @@ async def get_withdraw_callback(
         assert p1_id is not None  # validated above, whenever pr is None
         refund = (len(note_ids) - 1) * settings.base_fee_msat
         merged_amount = total_msat + refund
-        notes.swap(note_ids, [p1_id], [merged_amount], [_is_ct1_ref(p1 or "")])
-        return WithdrawSuccessResponse(
-            sig=await _certificate(p1_id, merged_amount, p1_is_cp1, settings.funding_source())
-        )
+        notes.swap(note_ids, [p1_id], [merged_amount])
+        return WithdrawSuccessResponse(sig=await _certificate(p1_id, merged_amount, settings.funding_source()))
     except OutputCollisionError as exc:
-        if (exc.note_id == p1_id and p1_is_cp1) or (exc.note_id == p2_id and p2_is_cp1):
-            raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
-        raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid or already spent k1.")
+        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
     except PendingNoteError:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
     except ValueError as exc:
         # a note resolved fine above but lost a race with a concurrent
         # request before it could be burned - same known-safe message
-        # _resolve_note itself uses, not an internal error
+        # _verified_note itself uses, not an internal error
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))

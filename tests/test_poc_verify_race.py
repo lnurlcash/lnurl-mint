@@ -22,14 +22,12 @@ VERIFY_ENABLED=false is a real off switch - the endpoint 404s entirely (not
 just its advertisement) - see test_verify_disabled_closes_the_hole.
 """
 
-from hashlib import sha256
-
 import bolt11
 from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import FakeNode, fake_invoice, fresh_secret
+from tests.conftest import FakeNode, bearer_id, fake_invoice, fresh_secret, k1_id
 
 
 def test_theft_chain_closed_at_the_door_comment_is_now_mandatory(client: TestClient, node: FakeNode, monkeypatch):
@@ -78,14 +76,14 @@ def test_theft_chain_closed_because_comment_makes_the_preimage_harmless(
     _, attacker_h = fresh_secret()
     r = client.get(f"/w/cb?k1={stolen_preimage}&p1={attacker_h}")
     assert r.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}
-    assert notes.note_amount(attacker_h) is None
+    assert notes.note_amount(bearer_id(attacker_h)) is None
 
     # only the victim's own held secret redeems the note, at their leisure -
     # no race to win, since nobody else ever had anything that worked
     _, victim_h = fresh_secret()
     r = client.get(f"/w/cb?k1={victim_secret}&p1={victim_h}")
     assert r.json()["status"] == "OK", r.text
-    assert notes.note_amount(victim_h) == 50_000
+    assert notes.note_amount(bearer_id(victim_h)) == 50_000
 
 
 def test_no_comment_mint_never_gets_far_enough_to_have_a_verify_url(client: TestClient, node: FakeNode, monkeypatch):
@@ -107,7 +105,7 @@ def test_melt_direction_verify_is_harmless(client: TestClient, node: FakeNode, m
     unknown."""
     monkeypatch.setattr(settings, "verify_enabled", True)
     k1 = mint_note(50_000)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    note_id = k1_id(k1)
 
     # victim melts their note into an external invoice
     melt_invoice = fake_invoice(50_000)
@@ -137,7 +135,7 @@ def test_melt_direction_verify_is_harmless(client: TestClient, node: FakeNode, m
     _, attacker_h = fresh_secret()
     r = client.get(f"/w/cb?k1={melt_preimage}&p1={attacker_h}")
     assert r.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}
-    assert notes.note_amount(attacker_h) is None
+    assert notes.note_amount(bearer_id(attacker_h)) is None
     # and the original note's secret is equally dead (already burned)
     r = client.get(f"/w/cb?k1={k1}&p1={attacker_h}")
     assert r.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}
@@ -162,4 +160,4 @@ def test_verify_disabled_closes_the_hole(client: TestClient, node: FakeNode):
     _, victim_h = fresh_secret()
     r = client.get(f"/w/cb?k1={victim_secret}&p1={victim_h}")
     assert r.json()["status"] == "OK", r.text
-    assert notes.note_amount(victim_h) == 50_000
+    assert notes.note_amount(bearer_id(victim_h)) == 50_000

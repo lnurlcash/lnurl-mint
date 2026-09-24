@@ -41,6 +41,7 @@ from hashlib import sha256
 from os import urandom
 
 import bolt11
+import lnurlcashkernel
 import pytest
 from bolt11.models.tags import TagChar, Tags
 from bolt11.types import Bolt11
@@ -88,12 +89,40 @@ def sign_schnorr_message(key: PrivateKey, message: bytes) -> bytes:
 
 
 def fresh_secret() -> tuple[str, str]:
-    """A (k1, h) pair for LUD-25's WALLET-generated rotate/split/merge
-    secret: k1 is what a real wallet (here, the test itself) would keep
-    and never transmit, h = sha256(k1) hex is what actually goes on the
-    /w/cb request as h/h2 - this mint is never given k1 itself for these."""
+    """A (k1, h) pair for a WALLET-generated bearer note, in LUD-25's short
+    forms: k1 is its spend (the preimage), what a real wallet (here, the
+    test itself) keeps; h = sha256(k1) hex names the note on a mint comment
+    or as p1/p2 - this mint is never given k1 itself for these. Stored
+    under bearer_id(h)."""
     secret = urandom(32).hex()
     return secret, sha256(bytes.fromhex(secret)).hexdigest()
+
+
+def bearer_id(h: str) -> str:
+    """The note id (hex Q) of the bearer note whose secret hashes to `h` -
+    where this mint stores a note minted or rotated with `h` as its short
+    form (LUD-25: NUMS internal key, one `OP_SHA256 <h> OP_EQUAL` leaf)."""
+    return lnurlcashkernel.preimage_note(bytes.fromhex(h))[0].hex()
+
+
+def k1_hash(k1: str) -> str:
+    """The hex `h` naming a hex `k1` secret's bearer note (its `cp1` short
+    form, e.g. for ?p=)."""
+    return sha256(bytes.fromhex(k1)).hexdigest()
+
+
+def k1_id(k1: str) -> str:
+    """The note id (hex Q) of the bearer note a hex `k1` secret spends."""
+    return bearer_id(sha256(bytes.fromhex(k1)).hexdigest())
+
+
+def ck1_for(key: PrivateKey, domain: str = "testserver") -> str:
+    """The `ck1` key-path spend of the note Q = x(key·G) at `domain`: a
+    BIP-340 signature (zero aux_rand, like a real WALLET) over the canonical
+    spend transaction's sighash (lnurlcashkernel.key_path_sighash)."""
+    q = key.public_key.format(compressed=True)[1:]
+    sig = sign_schnorr_message(key, lnurlcashkernel.key_path_sighash(q, domain))
+    return lnurlcashkernel.encode_ck1(lnurlcashkernel.Spend(0, 0xFFFFFFFF, None, None, (sig,), key=q))
 
 
 def fake_invoice(amount_msat: int, payment_hash: str | None = None) -> str:

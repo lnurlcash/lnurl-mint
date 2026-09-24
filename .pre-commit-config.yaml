@@ -1,0 +1,40 @@
+# install with `make precommit-install`, run by hand with `make precommit`
+#
+# the lint hooks are `local` and go through `uv run`, not the upstream
+# black/ruff/mypy hook repos - that way they use the exact versions pinned in
+# uv.lock (the same ones CI runs) instead of a second, drifting set pinned here
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: black
+        name: black
+        entry: uv run black
+        language: system
+        types: [python]
+        files: ^(lnurl_mint|tests)/
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+        files: ^(lnurl_mint|tests)/
+      # whole-package run (like `make mypy`), not per-file - mypy needs the
+      # full import graph to type-check a change correctly
+      - id: mypy
+        name: mypy
+        entry: uv run mypy lnurl_mint
+        language: system
+        types: [python]
+        files: ^lnurl_mint/
+        pass_filenames: false

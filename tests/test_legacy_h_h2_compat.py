@@ -4,16 +4,14 @@ informational GET's hash-lookup) are the spec's old names for what is now
 `p1`/`p2`/`p` - still accepted, equivalent in every way, just an older
 spelling. See router.get_withdraw/get_withdraw_callback."""
 
-from hashlib import sha256
-
 from fastapi.testclient import TestClient
 
-from tests.conftest import fresh_secret
+from tests.conftest import fresh_secret, k1_id
 
 
 def test_informational_get_accepts_legacy_h(client: TestClient, mint_note):
     k1 = mint_note(5000)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    note_id = k1_id(k1)
     by_p = client.get(f"/w?p={note_id}").json()
     by_h = client.get(f"/w?h={note_id}").json()
     assert by_h == by_p
@@ -22,7 +20,7 @@ def test_informational_get_accepts_legacy_h(client: TestClient, mint_note):
 
 def test_informational_get_prefers_p_when_both_given(client: TestClient, mint_note):
     k1 = mint_note(5000)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    note_id = k1_id(k1)
     # a bogus h alongside a valid p: p must win, not error or use h
     data = client.get(f"/w?p={note_id}&h={'0' * 64}").json()
     assert data["maxWithdrawable"] == 5000

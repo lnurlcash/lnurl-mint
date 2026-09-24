@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import FakeNode, fresh_secret
+from tests.conftest import FakeNode, bearer_id, fresh_secret, k1_id
 
 VALUE = 21_000
 
@@ -58,7 +58,7 @@ def test_valid_comment_note_redeems_normally_by_secret(client: TestClient, node:
     _, h = fresh_secret()
     r = client.get(f"/w/cb?k1={secret}&p1={h}").json()
     assert r["status"] == "OK", r
-    assert notes.note_amount(h) == VALUE
+    assert notes.note_amount(bearer_id(h)) == VALUE
 
 
 def test_missing_comment_is_rejected(client: TestClient, node: FakeNode):
@@ -100,10 +100,10 @@ def test_informational_get_lazily_settles_a_comment_protected_mint_without_verif
     client.get(f"/p/cb?amount={VALUE}&comment={comment}")
     node.settled.add(sha256(node.last_preimage).hexdigest())
 
-    assert notes.note_amount(comment) is None  # not yet materialized
+    assert notes.note_amount(bearer_id(comment)) is None  # not yet materialized
     data = client.get(f"/w?k1={secret}").json()
     assert data["maxWithdrawable"] == VALUE
-    assert notes.note_amount(comment) == VALUE  # now it is
+    assert notes.note_amount(bearer_id(comment)) == VALUE  # now it is
 
 
 def test_unsettled_comment_protected_mint_is_not_yet_a_note(client: TestClient, node: FakeNode):
@@ -118,7 +118,7 @@ def test_comment_colliding_with_an_outstanding_note_is_rejected(client: TestClie
     # in use as an outstanding note's id - create_mint must refuse rather
     # than let a later settle silently shadow or fail against that note
     existing_k1 = mint_note(VALUE)
-    existing_note_id = sha256(bytes.fromhex(existing_k1)).hexdigest()
+    existing_note_id = k1_id(existing_k1)
     # mint_note only settles the invoice - materialize the note itself
     # (lazy, via the informational GET) before the collision can be hit
     assert client.get(f"/w?k1={existing_k1}").json()["maxWithdrawable"] == VALUE
@@ -146,5 +146,5 @@ def test_comment_protected_note_can_split_rotate_and_merge_like_any_other(client
     _, h2 = fresh_secret()
     r = client.get(f"/w/cb?k1={secret}&p1={h}&p2={h2}&amount=5000").json()
     assert r["status"] == "OK", r
-    assert notes.note_amount(h) == 5000
-    assert notes.note_amount(h2) == VALUE - 5000
+    assert notes.note_amount(bearer_id(h)) == 5000
+    assert notes.note_amount(bearer_id(h2)) == VALUE - 5000

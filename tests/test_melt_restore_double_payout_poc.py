@@ -41,7 +41,7 @@ from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from lnurl_mint.node import PaymentFailed, PaymentResult
 from lnurl_mint.server import app
-from tests.conftest import fresh_secret
+from tests.conftest import fresh_secret, k1_id
 
 VALUE = 100_000
 
@@ -151,7 +151,7 @@ def mint_note(client: TestClient, node: HodlNode, amount_msat: int = VALUE) -> s
 
 
 def outstanding(k1: str) -> int | None:
-    return notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest())
+    return notes.note_amount(k1_id(k1))
 
 
 def test_variant_a_ambiguous_failure_leaves_the_note_pending_not_restored(hodl_client, hodl):

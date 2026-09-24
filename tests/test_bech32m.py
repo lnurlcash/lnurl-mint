@@ -1,4 +1,6 @@
-"""LUD-25 Part 2's Encoding: bech32m (BIP-350) for cp1/ck1/cs1/cx1."""
+"""LUD-25's Encoding: this mint's own bech32m (BIP-350) codec, for cp1/cs1/cx1
+and the deprecated ck1 shape. Current ck1/cw1 spends are decoded by
+lnurlcashkernel (see spend.py)."""
 
 from os import urandom
 
@@ -39,20 +41,14 @@ def test_roundtrip(encode, decode, length):
     assert decode(encoded) == data
 
 
-def test_ck1_roundtrip():
-    pubkey, signature = urandom(32), urandom(64)
-    encoded = bech32m.encode_ck1(pubkey, signature)
-    assert bech32m.decode_ck1(encoded) == (pubkey, signature)
-
-
 def test_ck1_legacy_roundtrip():
     """TODO(deprecated): the pre-schnorr bare-65-byte ck1 shape must still
-    decode via decode_ck1_legacy (but not the current decode_ck1) during
-    the transition - see bech32m.decode_ck1_legacy."""
+    decode via decode_ck1_legacy during the transition - and never a
+    current 96-byte one - see bech32m.decode_ck1_legacy."""
     signature = urandom(65)
     encoded = bech32m.encode("ck", signature)
     assert bech32m.decode_ck1_legacy(encoded) == signature
-    assert bech32m.decode_ck1(encoded) is None
+    assert bech32m.decode_ck1_legacy(bech32m.encode("ck", urandom(96))) is None
 
 
 @pytest.mark.parametrize("amount_msat", [0, 1, 1000, 21000, 5000, 100_000_000])
@@ -69,7 +65,6 @@ def test_cs1_roundtrip_carries_the_amount_in_its_hrp(amount_msat):
 def test_encoded_lengths_match_the_spec():
     """25.md's Encoding section states each prefix's exact total length."""
     assert len(bech32m.encode_cp1(urandom(32))) == 61
-    assert len(bech32m.encode_ck1(urandom(32), urandom(64))) == 163
     assert len(bech32m.encode_cx1(urandom(64))) == 112
     # cs1's total length is no longer fixed - it grows with the number of
     # digits its amount needs (its HRP is "cs" + amount + multiplier, see
@@ -83,14 +78,12 @@ def test_wrong_length_raises_on_encode():
     with pytest.raises(ValueError):
         bech32m.encode_cp1(urandom(31))
     with pytest.raises(ValueError):
-        bech32m.encode_ck1(urandom(31), urandom(64))
-    with pytest.raises(ValueError):
-        bech32m.encode_ck1(urandom(32), urandom(63))
+        bech32m.encode_cx1(urandom(63))
 
 
 def test_wrong_hrp_is_rejected():
-    ck1 = bech32m.encode_ck1(urandom(32), urandom(64))
-    assert bech32m.decode_cp1(ck1) is None
+    assert bech32m.decode_cp1(bech32m.encode_cx1(urandom(64))) is None
+    assert bech32m.decode_cp1(bech32m.encode("ck", urandom(32))) is None
 
 
 def test_corrupted_checksum_is_rejected():
@@ -103,12 +96,12 @@ def test_corrupted_checksum_is_rejected():
 
 def test_exceeds_bip173_length_limit_but_still_decodes():
     """25.md explicitly departs from BIP-173's ~90-character segwit-address
-    cap for ck1/cs1/cx1 (163/113/112 chars) - bech32_decode from the
-    `bech32` dependency enforces that cap and would reject these, which is
-    exactly why bech32m.decode reimplements the length check itself."""
-    ck1 = bech32m.encode_ck1(urandom(32), urandom(64))
-    assert len(ck1) > 90
-    assert bech32m.decode_ck1(ck1) is not None
+    cap for cs1/cx1 (116/112 chars) - bech32_decode from the `bech32`
+    dependency enforces that cap and would reject these, which is exactly
+    why bech32m.decode reimplements the length check itself."""
+    cx1 = bech32m.encode_cx1(urandom(64))
+    assert len(cx1) > 90
+    assert bech32m.decode_cx1(cx1) is not None
 
 
 def test_garbage_input_returns_none_not_raises():

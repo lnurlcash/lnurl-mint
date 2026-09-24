@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import FakeNode, fresh_secret
+from tests.conftest import FakeNode, bearer_id, fresh_secret, k1_id
 
 
 def test_f1_verify_disclosure_requires_verify_enabled(client: TestClient, node: FakeNode):
@@ -45,7 +45,7 @@ def test_f1_verify_disclosure_requires_verify_enabled(client: TestClient, node: 
     _, victim_h = fresh_secret()
     rotate = client.get(f"/w/cb?k1={victim_secret}&p1={victim_h}")
     assert rotate.json()["status"] == "OK", rotate.text
-    assert notes.note_amount(victim_h) == 50_000
+    assert notes.note_amount(bearer_id(victim_h)) == 50_000
 
 
 def test_f3_withdraw_rejects_pending_note_with_spec_reason(client: TestClient, node: FakeNode, mint_note):
@@ -92,11 +92,12 @@ def test_f4_rotate_onto_pending_mint_rejected_victim_unharmed(client: TestClient
     victim_preimage = node.last_preimage
     victim_ph = sha256(victim_preimage).hexdigest()
 
-    # the squat attempt fails atomically - nothing planted, nothing burned
-    r1 = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_ph}")
-    assert r1.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}, r1.text
-    assert notes.note_amount(victim_ph) is None  # no squatter row
-    attacker_id = sha256(bytes.fromhex(attacker_k1)).hexdigest()
+    # the squat on the note the victim's mint will credit fails atomically
+    # - nothing planted, nothing burned
+    r1 = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_comment}")
+    assert r1.json() == {"status": "ERROR", "reason": "Output already in use."}, r1.text
+    assert notes.note_amount(bearer_id(victim_comment)) is None  # no squatter row
+    attacker_id = k1_id(attacker_k1)
     assert notes.note_amount(attacker_id) == 10_000  # attacker's note intact
 
     # victim pays: the mint materializes for its full value, exactly as if

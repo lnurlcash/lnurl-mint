@@ -37,12 +37,13 @@ from fastapi.testclient import TestClient
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from lnurl_mint.router import _min_sendable_msat
-from tests.conftest import FakeNode, fresh_secret
+from tests.conftest import FakeNode, bearer_id, fresh_secret, k1_id
 
 
 def test_p3_rotate_onto_pending_mint_is_rejected(client: TestClient, node: FakeNode, mint_note):
-    # attacker owns a note and knows a victim's pending mint payment_hash
-    # (learnable from the victim's invoice pr, which embeds it)
+    # attacker owns a note and knows the note a victim's pending mint will
+    # credit (the comment it named) - the payment hash no longer matters,
+    # see test_poc_a1_collision_griefing
     attacker_k1 = mint_note(10_000)
 
     # victim requests a mint invoice but has not paid it yet
@@ -53,10 +54,10 @@ def test_p3_rotate_onto_pending_mint_is_rejected(client: TestClient, node: FakeN
     assert notes.pending_mint(victim_ph) is not None
 
     # the squat is rejected atomically - nothing planted, nothing burned
-    resp = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_ph}")
-    assert resp.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}, resp.text
-    assert notes.note_amount(victim_ph) is None
-    attacker_id = sha256(bytes.fromhex(attacker_k1)).hexdigest()
+    resp = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_comment}")
+    assert resp.json() == {"status": "ERROR", "reason": "Output already in use."}, resp.text
+    assert notes.note_amount(bearer_id(victim_comment)) is None
+    attacker_id = k1_id(attacker_k1)
     assert notes.note_amount(attacker_id) == 10_000
 
     # victim pays -> their mint materializes for the full amount

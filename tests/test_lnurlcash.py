@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 import lnurl_mint.router as router_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import FakeNode, fake_invoice, fresh_secret
+from tests.conftest import FakeNode, bearer_id, fake_invoice, fresh_secret, k1_hash, k1_id
 from tests.conftest import melt_in_background as _melt_in_background
 
 
@@ -613,7 +613,7 @@ def test_undeterminable_payment_status_leaves_the_note_pending(client: TestClien
     # still outstanding (its value isn't lost) - probed at the store, since
     # /w truthfully rejects a pending note with the spec's reason instead of
     # advertising a value for it (see test_poc_f2_pending_info_leak.py)
-    assert notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest()) == 5000
+    assert notes.note_amount(k1_id(k1)) == 5000
     assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
     _, h = fresh_secret()
     assert client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
@@ -641,7 +641,7 @@ def test_hodl_invoice_attack_leaves_the_note_pending_instead_of_restoring(
     pr = fake_invoice(5000)
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
     # same as above: outstanding at the store, "pending" on the wire
-    assert notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest()) == 5000
+    assert notes.note_amount(k1_id(k1)) == 5000
     assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
     _, h = fresh_secret()
     assert client.get(f"/w/cb?k1={k1}&p1={h}").json() == {"status": "ERROR", "reason": "pending"}
@@ -719,11 +719,10 @@ def test_withdraw_requires_k1(client: TestClient):
 
 def test_withdraw_by_hash_reports_the_same_note_without_the_secret(client: TestClient, mint_note):
     # LUD-25 "Checking a note without exposing it": ?p= is a second way in
-    # for the same lookup, keyed by the note's id (sha256(k1)) directly
+    # for the same lookup - here the bearer note's hex `h`, its short form
     k1 = mint_note(5000)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
     by_k1 = client.get(f"/w?k1={k1}").json()
-    by_h = client.get(f"/w?p={note_id}").json()
+    by_h = client.get(f"/w?p={k1_hash(k1)}").json()
     assert by_h["minWithdrawable"] == by_h["maxWithdrawable"] == 5000
     assert by_h["callback"] == by_k1["callback"]
     # unlike the k1 lookup, the response never echoes a secret it wasn't
@@ -734,8 +733,7 @@ def test_withdraw_by_hash_reports_the_same_note_without_the_secret(client: TestC
 
 def test_withdraw_by_hash_never_burns_the_note(client: TestClient, mint_note):
     k1 = mint_note(5000)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
-    client.get(f"/w?p={note_id}")
+    client.get(f"/w?p={k1_hash(k1)}")
     assert note_value(client, k1) == 5000
 
 
@@ -746,12 +744,12 @@ def test_withdraw_by_hash_rejects_an_unknown_hash(client: TestClient):
 
 def test_withdraw_by_hash_reports_a_retained_spent_note(client: TestClient, mint_note):
     k1 = mint_note(5000)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    note_id = k1_id(k1)
     new_k1, h = fresh_secret()
     assert client.get(f"/w/cb?k1={k1}&p1={h}").json()["status"] == "OK"  # rotate, burns k1
     # Both lookup forms report the retained spent record, while a never
     # registered hash remains unknown. These reads do not reissue the note.
-    for lookup in (f"p={note_id}", f"k1={k1}"):
+    for lookup in (f"p={k1_hash(k1)}", f"k1={k1}"):
         assert client.get(f"/w?{lookup}").json() == {"status": "ERROR", "reason": "Note already spent."}
     assert notes.note_spent(note_id)
     assert client.get(f"/w?p={urandom(32).hex()}").json() == {"status": "ERROR", "reason": "Unknown note."}
@@ -759,39 +757,38 @@ def test_withdraw_by_hash_reports_a_retained_spent_note(client: TestClient, mint
 
 def test_withdraw_requires_exactly_one_of_k1_or_p(client: TestClient, mint_note):
     k1 = mint_note(5000)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
     assert client.get("/w").json()["status"] == "ERROR"
-    assert client.get(f"/w?k1={k1}&p={note_id}").json()["status"] == "ERROR"
+    assert client.get(f"/w?k1={k1}&p={k1_hash(k1)}").json()["status"] == "ERROR"
 
 
 def test_withdraw_by_hash_reports_pending_the_same_way_k1_would(
     client: TestClient, node: FakeNode, mint_note, monkeypatch
 ):
     k1 = mint_note(5000)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    note_id = k1_id(k1)
     pr = fake_invoice(5000)
     node.pay_delay = 0.3
 
     thread = _melt_in_background(client, k1, pr, monkeypatch)
-    pending = client.get(f"/w?p={note_id}").json()
+    pending = client.get(f"/w?p={k1_hash(k1)}").json()
     thread.join()
 
     assert pending == {"status": "ERROR", "reason": "pending"}
-    assert client.get(f"/w?p={note_id}").json() == {"status": "ERROR", "reason": "Note already spent."}
+    assert client.get(f"/w?p={k1_hash(k1)}").json() == {"status": "ERROR", "reason": "Note already spent."}
     assert notes.note_spent(note_id)
 
 
 def test_failed_melt_restores_hash_lookup_value(client: TestClient, node: FakeNode, mint_note, monkeypatch):
     k1 = mint_note(5000)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    note_id = k1_id(k1)
     node.pay_delay = 0.3
     node.fail_payments = True
     thread = _melt_in_background(client, k1, fake_invoice(5000), monkeypatch)
-    pending = client.get(f"/w?p={note_id}").json()
+    pending = client.get(f"/w?p={k1_hash(k1)}").json()
     thread.join()
 
     assert pending == {"status": "ERROR", "reason": "pending"}
-    restored = client.get(f"/w?p={note_id}").json()
+    restored = client.get(f"/w?p={k1_hash(k1)}").json()
     assert restored["maxWithdrawable"] == 5000
     assert "k1" not in restored
     assert not notes.note_spent(note_id)
@@ -828,13 +825,14 @@ def test_no_bearer_secret_is_ever_persisted(client: TestClient, mint_note):
     stored = str(notes.conn.execute("SELECT * FROM notes").fetchall())
     stored += str(notes.conn.execute("SELECT * FROM mints").fetchall())
     # per LUD-25 neither of these secrets ever crossed the wire to begin
-    # with - this mint only ever saw their hashes (h/h2), so this is really
-    # just confirming it stored exactly what it was given, verbatim
+    # with - this mint only ever saw their hashes (h/h2), the short form of
+    # the bearer notes they spend
     for secret in (k1, new_k1, change_k1):
         assert secret not in stored
-    assert sha256(bytes.fromhex(k1)).hexdigest() in stored
-    assert h in stored
-    assert h2 in stored
+    # notes are stored under their output key Q (LUD-25), never the secret
+    assert k1_id(k1) in stored
+    assert bearer_id(h) in stored
+    assert bearer_id(h2) in stored
 
 
 def test_spent_k1_cannot_be_replayed(client: TestClient, mint_note):

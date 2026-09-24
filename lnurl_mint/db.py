@@ -24,21 +24,19 @@ class OutputCollisionError(ValueError):
 
 class NoteStore:
     """The set of outstanding bearer notes this mint has issued, plus the
-    pending mints (invoices whose preimage becomes a note once paid).
+    pending mints (invoices that become a note once paid).
 
-    No spendable secret is ever persisted: a note is keyed by its id -
-    sha256(k1) - so a leaked database reveals how many notes are
-    outstanding and for how much, but lets nobody spend them. For a
-    minted note that id is exactly the payment hash of the invoice that
-    funded it, which is why `mints` needs no preimage column and
-    settling one is a plain insert under the same key - unless the
-    WALLET used LUD-25 comment protection, in which case the id is
-    instead the WALLET-chosen comment_hash it disclosed on the payRequest
-    (see create_mint/settle_mint), and the payment preimage never becomes
-    part of the note at all. For a rotated, split or merged note (LUD-25),
-    the id is a hash the WALLET itself generated and disclosed (`p1`/`p2`)
-    - this store (and this mint) never has the secret to begin with, on
-    top of never persisting it.
+    No spendable secret is ever persisted: per LUD-25 a note is its taproot
+    output key Q, and is stored under hex(Q) - the `cp1` a WALLET disclosed
+    on the payRequest `comment` (see create_mint/settle_mint) or as `p1`/`p2`
+    on a rotate/split/merge. A leaked database reveals how many notes are
+    outstanding and for how much, but lets nobody spend them: this mint never
+    has a spend to begin with, on top of never persisting one.
+
+    One older id shape may still be on file (see migrate_legacy_note): a
+    note issued before notes were keyed by Q is stored under its bearer
+    secret's hash h = sha256(k1) - for a mint that skipped comment
+    protection, exactly the funding invoice's payment hash.
     Burned notes are kept with spent=1 rather than deleted, so a
     replayed k1 fails as "already spent" instead of dangling.
 
@@ -71,7 +69,7 @@ class NoteStore:
             self._conn.execute("PRAGMA busy_timeout = 5000")
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS notes ("
-                " id TEXT PRIMARY KEY,"  # sha256(k1), never the secret itself
+                " id TEXT PRIMARY KEY,"  # hex(Q), the note's taproot output key - never a spend
                 " amount_msat INTEGER NOT NULL,"
                 " spent INTEGER NOT NULL DEFAULT 0,"
                 " pending INTEGER NOT NULL DEFAULT 0,"  # reserved by an in-flight melt, see mark_pending
@@ -83,7 +81,7 @@ class NoteStore:
                 " pr TEXT NOT NULL,"  # LUD-21 verify only, never the secret
                 " amount_msat INTEGER NOT NULL,"
                 " minted INTEGER NOT NULL DEFAULT 0,"
-                " comment_hash TEXT)"  # LUD-25 comment protection, see create_mint
+                " comment_hash TEXT)"  # hex(Q) of the note this mint credits, see create_mint
             )
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS melts ("
@@ -129,14 +127,11 @@ class NoteStore:
             # `comment_hash` on `mints` - existing rows predate it entirely,
             # so they get NULL, same as any mint that skipped it
             self._add_column_if_missing(self._conn, "mints", "comment_hash", "TEXT")
-            # LUD-25 ct1 (taproot script-path locks): whether a note is a ct1
-            # lock (redeemable by a cw1 too, not only a ck1) and when this
-            # mint first recorded it - the reference point for a CSV leaf.
-            # Older rows predate ct1, so 0 is correct: never script-path
-            # redeemable.
-            self._add_column_if_missing(self._conn, "notes", "ct1", "INTEGER NOT NULL DEFAULT 0")
+            # when this mint credited a note - where a spend's relative
+            # timelock (BIP-68, via lnurlcashkernel) starts counting. Rows
+            # from before it get 0: credited "long ago", the right answer
+            # for any relative lock on a note that old.
             self._add_column_if_missing(self._conn, "notes", "locked_at", "INTEGER NOT NULL DEFAULT 0")
-            self._add_column_if_missing(self._conn, "mints", "comment_ct1", "INTEGER NOT NULL DEFAULT 0")
             # a database from before mark_melt_settled has no `settled` on
             # `melts` - existing rows predate it entirely; router._melt_settled
             # falls back to a live is_payment_complete check whenever this is
@@ -178,40 +173,51 @@ class NoteStore:
         amount_msat: int,
         comment_hash: str | None = None,
         zap_request: str | None = None,
-        comment_ct1: bool = False,
+        also_reserved: tuple[str, ...] = (),
     ) -> None:
-        """Record an invoice whose preimage will become a bearer note worth
-        `amount_msat` once the invoice settles (see settle_mint). Only the
-        payment hash and the invoice itself (`pr`, for LUD-21 verify) are
-        stored - the preimage reaches the buyer through the Lightning
-        payment itself.
+        """Record an invoice that becomes a note worth `amount_msat` once it
+        settles (see settle_mint). Only the payment hash and the invoice
+        itself (`pr`, for LUD-21 verify) are stored.
 
-        `comment_hash` is LUD-25's comment protection (Protecting a freshly
-        minted note from a preimage race): a WALLET-chosen hash, carried on
-        the payRequest as `comment` per LUD-12, that the resulting note gets
-        credited under (as `k1=<secret>`) instead of the payment preimage
-        once this invoice settles - see settle_mint. Raises ValueError,
-        recording nothing, if `comment_hash` collides with an id already in
-        use, either an outstanding note or another mint's comment_hash - a
-        WALLET generating a fresh, unpredictable secret each time should
-        never hit this honestly.
+        `comment_hash` is hex(Q) of the note to credit, from the `cp1` (or a
+        bearer note's hex `h`) a WALLET sent as the LUD-12 `comment`, or
+        derived by this mint for a registered Lightning Address. Raises
+        ValueError, recording nothing, if it collides with an id already in
+        use, either a note or another mint's - a WALLET generating a fresh
+        note each time should never hit this honestly. `also_reserved`
+        names further ids to check (a bearer note's pre-taproot id, see
+        migrate_legacy_note).
 
         `zap_request` is the NIP-57 kind 9734 the invoice was bound to,
         verbatim, for the receipt published once it settles (see
         unpublished_zaps)."""
         with self._lock, self.conn:
             if comment_hash is not None:
-                collision = self.conn.execute(
-                    "SELECT 1 FROM notes WHERE id = ? UNION SELECT 1 FROM mints WHERE comment_hash = ?",
-                    (comment_hash, comment_hash),
-                ).fetchone()
-                if collision:
-                    raise ValueError("comment already in use")
+                for note_id in (comment_hash, *also_reserved):
+                    if self._id_in_use(note_id):
+                        raise ValueError("comment already in use")
             self.conn.execute(
-                "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash, zap_request, created_at, comment_ct1)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (payment_hash, pr, amount_msat, comment_hash, zap_request, int(time.time()), int(comment_ct1)),
+                "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash, zap_request, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (payment_hash, pr, amount_msat, comment_hash, zap_request, int(time.time())),
             )
+
+    def _id_in_use(self, note_id: str) -> bool:
+        """Whether `note_id` already names a note, spent or not, or the note
+        some mint invoice will credit once paid - either way, crediting a
+        new note under it would collide. Caller holds the lock."""
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM notes WHERE id = ?"
+                " UNION SELECT 1 FROM mints WHERE comment_hash = ? OR (comment_hash IS NULL AND payment_hash = ?)",
+                (note_id, note_id, note_id),
+            ).fetchone()
+            is not None
+        )
+
+    def id_in_use(self, note_id: str) -> bool:
+        with self._lock:
+            return self._id_in_use(note_id)
 
     def pending_zap_mints(self, created_since: int, limit: int) -> list[str]:
         """Payment hashes of the `limit` newest unpaid zap invoices created
@@ -287,14 +293,12 @@ class NoteStore:
         return bool(row and row[0])
 
     def settle_mint(self, payment_hash: str) -> int | None:
-        """Turn a settled mint invoice into an outstanding note. Its id is
-        the payment hash itself (sha256 of the preimage the buyer holds) -
-        unless this mint used LUD-25 comment protection, in which case it's
-        that mint's comment_hash instead (create_mint already checked it
-        doesn't collide with anything), and the preimage plays no further
-        role. Returns its value, or None if a concurrent request already
-        minted it (in which case the note already exists and note_amount
-        finds it)."""
+        """Turn a settled mint invoice into an outstanding note, under the
+        comment_hash create_mint recorded (already checked not to collide) -
+        or, for a mint from before comment protection was mandatory, under
+        its payment hash (a pre-taproot id, see migrate_legacy_note).
+        Returns its value, or None if a concurrent request already minted it
+        (in which case the note already exists and note_amount finds it)."""
         with self._lock, self.conn:
             cursor = self.conn.execute(
                 "UPDATE mints SET minted = 1 WHERE payment_hash = ? AND minted = 0", (payment_hash,)
@@ -302,29 +306,46 @@ class NoteStore:
             if cursor.rowcount != 1:
                 return None
             row = self.conn.execute(
-                "SELECT amount_msat, comment_hash, comment_ct1 FROM mints WHERE payment_hash = ?", (payment_hash,)
+                "SELECT amount_msat, comment_hash FROM mints WHERE payment_hash = ?", (payment_hash,)
             ).fetchone()
-            amount_msat, comment_hash, comment_ct1 = row
+            amount_msat, comment_hash = row
             note_id = comment_hash if comment_hash is not None else payment_hash
             self.conn.execute(
-                "INSERT INTO notes (id, amount_msat, ct1, locked_at) VALUES (?, ?, ?, ?)",
-                (note_id, amount_msat, comment_ct1, int(time.time())),
+                "INSERT INTO notes (id, amount_msat, locked_at) VALUES (?, ?, ?)",
+                (note_id, amount_msat, int(time.time())),
             )
             return amount_msat
 
-    def ct1_note(self, note_id: str) -> tuple[int, int] | None:
-        """(amount_msat, locked_at) of the note `note_id` IF it was issued as a
-        ct1 lock - spent or not, so a retried burn can still be recognised
-        (spendability is note_amount's question). None for any other note:
-        a cw1 script-path spend is only ever valid against a ct1 note."""
+    def note_record(self, note_id: str) -> tuple[int, int, bool, bool] | None:
+        """(amount_msat, locked_at, spent, pending) of the note `note_id`,
+        spent or not - what verifying a spend of it needs (locked_at starts
+        a relative timelock), even for a burn being retried. None if this
+        mint never issued it."""
         row = self.conn.execute(
-            "SELECT amount_msat, locked_at FROM notes WHERE id = ? AND ct1 = 1", (note_id,)
+            "SELECT amount_msat, locked_at, spent, pending FROM notes WHERE id = ?", (note_id,)
         ).fetchone()
-        return (row[0], row[1]) if row else None
+        return (row[0], row[1], bool(row[2]), bool(row[3])) if row else None
+
+    def migrate_legacy_note(self, legacy_id: str, note_id: str) -> None:
+        """Move a note stored under its pre-taproot id (h = sha256 of its
+        bearer secret) to its LUD-25 id, hex(Q) of the bearer note that same
+        secret spends. Done lazily, by the first request that proves the
+        link - a spend revealing the secret, or its hex `h` - since nothing
+        on file tells a pre-taproot hash apart from a `cp1` key: both are 32
+        bytes of hex. A no-op if nothing is stored under `legacy_id`, or
+        something already is under `note_id`. A pending mint that will
+        credit `legacy_id` is repointed too."""
+        with self._lock, self.conn:
+            if self.conn.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,)).fetchone():
+                return
+            self.conn.execute("UPDATE notes SET id = ? WHERE id = ?", (note_id, legacy_id))
+            self.conn.execute(
+                "UPDATE mints SET comment_hash = ? WHERE comment_hash = ? AND minted = 0", (note_id, legacy_id)
+            )
 
     def note_amount(self, note_id: str) -> int | None:
         """Value of the outstanding (unspent) note with id `note_id`
-        (sha256 of its k1), or None."""
+        (hex(Q)), or None."""
         row = self.conn.execute("SELECT amount_msat FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
         return row[0] if row else None
 
@@ -373,25 +394,21 @@ class NoteStore:
         burn_ids: list[str],
         mint_note_ids: list[str],
         mint_amounts: list[int],
-        mint_ct1: list[bool] | None = None,
     ) -> None:
         """Atomically burn every note in `burn_ids` and mint one fresh note
         per (id, amount) in zip(mint_note_ids, mint_amounts). Per LUD-25,
-        `mint_note_ids` are hashes the WALLET itself generated and
+        `mint_note_ids` are output keys the WALLET itself generated and
         disclosed (`p1`/`p2` on the callback) - this side never generates,
-        sees, or persists the underlying secret, only registers a note
-        under the hash it was given. Raises ValueError - burning and
+        sees, or persists a spend, only registers a note under the Q it was
+        given. Raises ValueError - burning and
         minting nothing - if any burn id is unknown, already spent, or
         repeated (the second burn of a duplicate finds it spent by the
         first). Raises OutputCollisionError if any mint id is repeated or
-        collides with an existing note (a WALLET generating a fresh,
-        unpredictable preimage each time should never hit this honestly),
-        or ValueError if one collides with any invoice this mint ever
-        issued: a minted note's id IS its funding invoice's payment
-        hash (see settle_mint), so a WALLET-chosen id planted under a
-        *pending* invoice's payment hash would shadow that mint once paid
-        and then block settle_mint's INSERT under the same key forever -
-        bricking a paid mint for the price of a dust note. Raises
+        collides with an existing note (a WALLET generating a fresh note
+        each time should never hit this honestly), or names the note some
+        mint invoice will credit once paid: planted there, it would block
+        settle_mint's INSERT under the same key forever - bricking a paid
+        mint for the price of a dust note. Raises
         PendingNoteError instead if any burn id is reserved by an
         in-flight melt (see mark_pending): per the spec, that's a
         distinct "pending" rejection, not a plain invalid/spent one.
@@ -421,11 +438,13 @@ class NoteStore:
 
                     seen_mint_ids: set[str] = set()
                     for note_id in mint_note_ids:
-                        if self.conn.execute("SELECT 1 FROM mints WHERE payment_hash = ?", (note_id,)).fetchone():
-                            # same known-safe message as any other invalid
-                            # id - which table it collided with is nobody's
-                            # business but the operator's
-                            raise ValueError("Invalid or already spent k1.")
+                        if self.conn.execute(
+                            "SELECT 1 FROM mints WHERE comment_hash = ? OR (comment_hash IS NULL AND payment_hash = ?)",
+                            (note_id, note_id),
+                        ).fetchone():
+                            # the note some mint invoice will credit: as taken
+                            # as one already on file, per LUD-25
+                            raise OutputCollisionError(note_id)
                         if (
                             note_id in seen_mint_ids
                             or self.conn.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,)).fetchone()
@@ -435,12 +454,11 @@ class NoteStore:
 
                     for note_id in burn_ids:
                         self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
-                    ct1_flags = mint_ct1 if mint_ct1 is not None else [False] * len(mint_note_ids)
                     locked_at = int(time.time())
-                    for note_id, amount_msat, is_ct1 in zip(mint_note_ids, mint_amounts, ct1_flags):
+                    for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
                         self.conn.execute(
-                            "INSERT INTO notes (id, amount_msat, ct1, locked_at) VALUES (?, ?, ?, ?)",
-                            (note_id, amount_msat, int(is_ct1), locked_at),
+                            "INSERT INTO notes (id, amount_msat, locked_at) VALUES (?, ?, ?)",
+                            (note_id, amount_msat, locked_at),
                         )
                     self.conn.execute(
                         "INSERT INTO burns (burn_key, h, h2, amount1_msat, amount2_msat) VALUES (?, ?, ?, ?, ?)",
@@ -651,8 +669,8 @@ class NoteStore:
 
     def claim_next_index(self, username: str, derive: Callable[[int], str]) -> tuple[str, int]:
         """Picks and reserves the next usable note index on `username`'s
-        registered branch - LUD-25 Part 2's own race-avoidance paragraph
-        under Seed & derivation: `derive(i)` (router.py, wrapping
+        registered branch - LUD-25's own race-avoidance paragraph under
+        Lightning Address auto-mint: `derive(i)` (router.py, wrapping
         derivation.derive_pubkey) is tried starting at the persisted
         next_index, skipping any index whose resulting pubkey already
         names an outstanding *or* previously-minted note - the same
@@ -669,11 +687,7 @@ class NoteStore:
             index = row[0]
             while True:
                 pk_hex = derive(index)
-                collision = self.conn.execute(
-                    "SELECT 1 FROM notes WHERE id = ? UNION SELECT 1 FROM mints WHERE comment_hash = ?",
-                    (pk_hex, pk_hex),
-                ).fetchone()
-                if not collision:
+                if not self._id_in_use(pk_hex):
                     break
                 index += 1
             self.conn.execute("UPDATE usernames SET next_index = ? WHERE username = ?", (index + 1, username))
