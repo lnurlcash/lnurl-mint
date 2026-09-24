@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import FakeNode, bearer_id, fresh_secret, k1_id
+from tests.conftest import FakeNode, bearer_id, fresh_secret, k1_hash, k1_id
 
 VALUE = 21_000
 
@@ -122,7 +122,7 @@ def test_comment_colliding_with_an_outstanding_note_is_rejected(client: TestClie
     # mint_note only settles the invoice - materialize the note itself
     # (lazy, via the informational GET) before the collision can be hit
     assert client.get(f"/w?k1={existing_k1}").json()["maxWithdrawable"] == VALUE
-    resp = client.get(f"/p/cb?amount={VALUE}&comment={existing_note_id}")
+    resp = client.get(f"/p/cb?amount={VALUE}&comment={k1_hash(existing_k1)}")
     assert resp.json() == {"status": "ERROR", "reason": "comment already in use"}
     # the existing note is completely unaffected
     assert notes.note_amount(existing_note_id) == VALUE

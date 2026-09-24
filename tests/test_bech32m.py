@@ -41,16 +41,6 @@ def test_roundtrip(encode, decode, length):
     assert decode(encoded) == data
 
 
-def test_ck1_legacy_roundtrip():
-    """TODO(deprecated): the pre-schnorr bare-65-byte ck1 shape must still
-    decode via decode_ck1_legacy during the transition - and never a
-    current 96-byte one - see bech32m.decode_ck1_legacy."""
-    signature = urandom(65)
-    encoded = bech32m.encode("ck", signature)
-    assert bech32m.decode_ck1_legacy(encoded) == signature
-    assert bech32m.decode_ck1_legacy(bech32m.encode("ck", urandom(96))) is None
-
-
 @pytest.mark.parametrize("amount_msat", [0, 1, 1000, 21000, 5000, 100_000_000])
 def test_cs1_roundtrip_carries_the_amount_in_its_hrp(amount_msat):
     """cs1, unlike its siblings, folds amount_msat into its own HRP (BOLT-11

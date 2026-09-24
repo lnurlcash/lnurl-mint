@@ -33,10 +33,6 @@ class NoteStore:
     outstanding and for how much, but lets nobody spend them: this mint never
     has a spend to begin with, on top of never persisting one.
 
-    One older id shape may still be on file (see migrate_legacy_note): a
-    note issued before notes were keyed by Q is stored under its bearer
-    secret's hash h = sha256(k1) - for a mint that skipped comment
-    protection, exactly the funding invoice's payment hash.
     Burned notes are kept with spent=1 rather than deleted, so a
     replayed k1 fails as "already spent" instead of dangling.
 
@@ -171,9 +167,8 @@ class NoteStore:
         payment_hash: str,
         pr: str,
         amount_msat: int,
-        comment_hash: str | None = None,
+        comment_hash: str,
         zap_request: str | None = None,
-        also_reserved: tuple[str, ...] = (),
     ) -> None:
         """Record an invoice that becomes a note worth `amount_msat` once it
         settles (see settle_mint). Only the payment hash and the invoice
@@ -184,18 +179,14 @@ class NoteStore:
         derived by this mint for a registered Lightning Address. Raises
         ValueError, recording nothing, if it collides with an id already in
         use, either a note or another mint's - a WALLET generating a fresh
-        note each time should never hit this honestly. `also_reserved`
-        names further ids to check (a bearer note's pre-taproot id, see
-        migrate_legacy_note).
+        note each time should never hit this honestly.
 
         `zap_request` is the NIP-57 kind 9734 the invoice was bound to,
         verbatim, for the receipt published once it settles (see
         unpublished_zaps)."""
         with self._lock, self.conn:
-            if comment_hash is not None:
-                for note_id in (comment_hash, *also_reserved):
-                    if self._id_in_use(note_id):
-                        raise ValueError("comment already in use")
+            if self._id_in_use(comment_hash):
+                raise ValueError("comment already in use")
             self.conn.execute(
                 "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash, zap_request, created_at)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
@@ -208,9 +199,8 @@ class NoteStore:
         new note under it would collide. Caller holds the lock."""
         return (
             self.conn.execute(
-                "SELECT 1 FROM notes WHERE id = ?"
-                " UNION SELECT 1 FROM mints WHERE comment_hash = ? OR (comment_hash IS NULL AND payment_hash = ?)",
-                (note_id, note_id, note_id),
+                "SELECT 1 FROM notes WHERE id = ?" " UNION SELECT 1 FROM mints WHERE comment_hash = ?",
+                (note_id, note_id),
             ).fetchone()
             is not None
         )
@@ -294,14 +284,14 @@ class NoteStore:
 
     def settle_mint(self, payment_hash: str) -> int | None:
         """Turn a settled mint invoice into an outstanding note, under the
-        comment_hash create_mint recorded (already checked not to collide) -
-        or, for a mint from before comment protection was mandatory, under
-        its payment hash (a pre-taproot id, see migrate_legacy_note).
+        comment_hash create_mint recorded (already checked not to collide).
         Returns its value, or None if a concurrent request already minted it
-        (in which case the note already exists and note_amount finds it)."""
+        (in which case the note already exists and note_amount finds it), or
+        if the mint names no note at all."""
         with self._lock, self.conn:
             cursor = self.conn.execute(
-                "UPDATE mints SET minted = 1 WHERE payment_hash = ? AND minted = 0", (payment_hash,)
+                "UPDATE mints SET minted = 1 WHERE payment_hash = ? AND minted = 0 AND comment_hash IS NOT NULL",
+                (payment_hash,),
             )
             if cursor.rowcount != 1:
                 return None
@@ -309,10 +299,9 @@ class NoteStore:
                 "SELECT amount_msat, comment_hash FROM mints WHERE payment_hash = ?", (payment_hash,)
             ).fetchone()
             amount_msat, comment_hash = row
-            note_id = comment_hash if comment_hash is not None else payment_hash
             self.conn.execute(
                 "INSERT INTO notes (id, amount_msat, locked_at) VALUES (?, ?, ?)",
-                (note_id, amount_msat, int(time.time())),
+                (comment_hash, amount_msat, int(time.time())),
             )
             return amount_msat
 
@@ -325,23 +314,6 @@ class NoteStore:
             "SELECT amount_msat, locked_at, spent, pending FROM notes WHERE id = ?", (note_id,)
         ).fetchone()
         return (row[0], row[1], bool(row[2]), bool(row[3])) if row else None
-
-    def migrate_legacy_note(self, legacy_id: str, note_id: str) -> None:
-        """Move a note stored under its pre-taproot id (h = sha256 of its
-        bearer secret) to its LUD-25 id, hex(Q) of the bearer note that same
-        secret spends. Done lazily, by the first request that proves the
-        link - a spend revealing the secret, or its hex `h` - since nothing
-        on file tells a pre-taproot hash apart from a `cp1` key: both are 32
-        bytes of hex. A no-op if nothing is stored under `legacy_id`, or
-        something already is under `note_id`. A pending mint that will
-        credit `legacy_id` is repointed too."""
-        with self._lock, self.conn:
-            if self.conn.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,)).fetchone():
-                return
-            self.conn.execute("UPDATE notes SET id = ? WHERE id = ?", (note_id, legacy_id))
-            self.conn.execute(
-                "UPDATE mints SET comment_hash = ? WHERE comment_hash = ? AND minted = 0", (note_id, legacy_id)
-            )
 
     def note_amount(self, note_id: str) -> int | None:
         """Value of the outstanding (unspent) note with id `note_id`
@@ -439,8 +411,8 @@ class NoteStore:
                     seen_mint_ids: set[str] = set()
                     for note_id in mint_note_ids:
                         if self.conn.execute(
-                            "SELECT 1 FROM mints WHERE comment_hash = ? OR (comment_hash IS NULL AND payment_hash = ?)",
-                            (note_id, note_id),
+                            "SELECT 1 FROM mints WHERE comment_hash = ?",
+                            (note_id,),
                         ).fetchone():
                             # the note some mint invoice will credit: as taken
                             # as one already on file, per LUD-25

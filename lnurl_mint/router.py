@@ -406,27 +406,13 @@ async def _note_amount_by_id(note_id: str) -> int | None:
     was never minted, or it has already been spent (rotated/split/merged/
     melted away). Materializes a note whose mint invoice has settled but
     that nothing has asked about yet (see NoteStore.settle_mint), by the
-    comment it was minted under, or - for a mint from before comment
-    protection was mandatory - its payment hash."""
+    comment it was minted under."""
     amount_msat = notes.note_amount(note_id)
     if amount_msat is not None:
         return amount_msat
-    if await _mint_settled(note_id):
-        return notes.note_amount(note_id)
     if await _mint_settled_by_comment(note_id):
         return notes.note_amount(note_id)
     return None
-
-
-async def _materialize(note_id: str, legacy_id: str | None) -> None:
-    """Brings the note `note_id` on file if it exists at all: settles its
-    mint if that was paid but never asked about, and moves a bearer note
-    issued before notes were keyed by Q from its old id `legacy_id` (see
-    NoteStore.migrate_legacy_note)."""
-    if legacy_id is not None:
-        await _note_amount_by_id(legacy_id)
-        notes.migrate_legacy_note(legacy_id, note_id)
-    await _note_amount_by_id(note_id)
 
 
 class _Rejected(Exception):
@@ -451,7 +437,7 @@ async def _verified_note(k1: str) -> tuple[str, int, bool, bool]:
     parsed = spend.parse(k1)
     if parsed is None:
         raise _Rejected(_INVALID_K1)
-    await _materialize(parsed.note_id, parsed.legacy_hash)
+    await _note_amount_by_id(parsed.note_id)
     record = notes.note_record(parsed.note_id)
     if record is None:
         raise _Rejected(_INVALID_K1)
@@ -464,13 +450,12 @@ async def _verified_note(k1: str) -> tuple[str, int, bool, bool]:
 
 async def _note_by_ref(value: str) -> str | None:
     """The note id `value` names where a `cp1` goes (?p=, and every other
-    cp1-shaped input): a `cp1`, or a bearer note's hex `h` - migrating a
-    note stored under that `h` itself first (see _materialize). None if
-    `value` is neither."""
+    cp1-shaped input): a `cp1`, or a bearer note's hex `h` (its short form).
+    None if `value` is neither."""
     note_id = spend.decode_note(value)
     if note_id is None:
         return None
-    await _materialize(note_id, spend.legacy_hash(value))
+    await _note_amount_by_id(note_id)
     return note_id
 
 
@@ -1003,9 +988,6 @@ async def _pay_callback(
         zap_request = nostr
 
     comment_hash = spend.decode_note(comment) if comment is not None else None
-    # a bearer note's hex `h` may still name a note stored under that `h`
-    # itself (see NoteStore.migrate_legacy_note) - reserved just the same
-    legacy_id = spend.legacy_hash(comment) if comment_hash is not None and comment is not None else None
     if comment_hash is None and branch is not None:
         # registered username: a comment that isn't a note ref (a payer's
         # WALLET sending an ordinary human LUD-12 message, or nothing at
@@ -1050,7 +1032,6 @@ async def _pay_callback(
             net_amount_msat,
             comment_hash,
             zap_request=zap_request,
-            also_reserved=(legacy_id,) if legacy_id is not None else (),
         )
     except ValueError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
@@ -1179,7 +1160,6 @@ async def get_withdraw(
     req: Request,
     k1: str | None = None,
     p: str | None = None,
-    h: str | None = None,
     amount: int | None = None,
 ) -> LnurlWithdrawResponse:
     """LUD-03 withdrawRequest for a bearer note. Purely informational: it
@@ -1204,12 +1184,6 @@ async def get_withdraw(
     unknown `k1`; a retained spent note returns "Note already spent." with
     either lookup form.
 
-    `h` is `p`'s old name, kept purely for backwards compatibility with a
-    WALLET built against a pre-rename mint (see this codebase's own history
-    - the spec itself has since renamed this field to `p`) - equivalent to
-    `p` in every way, just an older spelling. If both are given, `p` wins;
-    a WALLET should only ever send one or the other, never both.
-
     `amount` is accepted only because a note's URL encodes a
     (wallet-declared, unauthoritative) value as `?k1=...&amount=...` - it
     MUST be ignored here, never as a stand-in for the actual note value.
@@ -1227,7 +1201,6 @@ async def get_withdraw(
     certificate isn't a spend authorization - just this mint's signature
     over (Q, amount) - so handing one out for `p` never requires proof the
     caller holds the note's spend."""
-    p = p if p is not None else h
     if (k1 is None) == (p is None):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Specify exactly one of k1 or p.")
 
@@ -1283,8 +1256,6 @@ async def get_withdraw_callback(
     amount: int | None = None,
     p1: str | None = None,
     p2: str | None = None,
-    h: str | None = None,
-    h2: str | None = None,
 ) -> WithdrawSuccessResponse:
     """The lnurlcash redeem callback - see 25.md's "Redeeming a bearer
     note" table for the k1/pr/amount combinations (melt/rotate/split/merge)
@@ -1293,13 +1264,6 @@ async def get_withdraw_callback(
     generates for the replacement note(s) - required whenever `pr` is
     absent, and `p2` additionally whenever `amount` is too - this mint
     never generates one on WALLET's behalf.
-
-    `h`/`h2` are `p1`/`p2`'s old names, kept purely for backwards
-    compatibility with a WALLET built against a pre-rename mint (see this
-    codebase's own history - the spec itself has since renamed these
-    fields) - equivalent to `p1`/`p2` in every way, just an older spelling.
-    If both a field and its old name are given, the new name wins; a
-    WALLET should only ever send one spelling per field, never both.
 
     Details the spec leaves to the implementation:
     - min_mint_msat (/p/cb's dust floor for a *fresh* mint) does not apply
@@ -1326,8 +1290,6 @@ async def get_withdraw_callback(
       result replayed (sig/sig2 recomputed, deterministic per RFC6979)
       instead of "already spent" (see NoteStore.find_burn/swap). Melt is
       unaffected - LUD-25 only asks this of rotate/split/merge."""
-    p1 = p1 if p1 is not None else h
-    p2 = p2 if p2 is not None else h2
     if len(k1) > settings.max_k1s:
         raise HTTPException(HTTPStatus.BAD_REQUEST, f"Too many k1s (max {settings.max_k1s}).")
 
@@ -1393,13 +1355,6 @@ async def get_withdraw_callback(
                     else None
                 )
                 return WithdrawSuccessResponse(sig=sig, sig2=sig2)
-        # a bearer note's hex `h` may still name a note stored under that
-        # `h` itself (see NoteStore.migrate_legacy_note): crediting a second
-        # note for the same secret is a collision like any other
-        for ref in (p1, p2):
-            legacy_id = spend.legacy_hash(ref) if ref is not None else None
-            if legacy_id is not None and notes.id_in_use(legacy_id):
-                raise HTTPException(HTTPStatus.BAD_REQUEST, "Output already in use.")
 
     if any(spent for _, _, spent, _ in verified):
         raise HTTPException(HTTPStatus.BAD_REQUEST, _INVALID_K1)

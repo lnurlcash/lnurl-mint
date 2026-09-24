@@ -222,70 +222,24 @@ def test_comment_rejects_wrong_length_cp1_lookalike(client: TestClient):
     assert response.json()["status"] == "ERROR"
 
 
-def _legacy_ck1(sk: PrivateKey) -> str:
-    """TODO(deprecated): the pre-schnorr ck1 shape - a bare 65-byte
-    recoverable signature, no embedded pk - built the way an un-upgraded
-    WALLET still would, so tests can confirm the mint still honors it
-    during the transition (see bech32m.decode_ck1_legacy,
-    signing.recover_note_pubkey)."""
-    sig = sk.sign_recoverable(lightning_signed_message_digest("LNURLcash"), hasher=None)
-    return bech32m.encode("ck", sig)
-
-
-def test_legacy_ck1_still_redeems_a_cp1_note(client: TestClient, node: FakeNode):
-    """TODO(deprecated): a note redeemed with the old bare-signature ck1
-    shape must still work while the mint stays backwards compatible with
-    un-upgraded WALLETs."""
-    sk, cp1 = _mint_cp1_note(client, node, 5000)
-    legacy_k1 = _legacy_ck1(sk)
-    data = client.get(f"/w?k1={legacy_k1}").json()
-    assert data["minWithdrawable"] == data["maxWithdrawable"] == 5000
-
-    new_sk, new_cp1 = _note_keypair()
-    cb = client.get(f"/w/cb?k1={legacy_k1}&p1={new_cp1}").json()
-    assert cb["status"] == "OK"
-    new_k1 = _ck1(new_sk)
-    assert client.get(f"/w?k1={new_k1}").json()["maxWithdrawable"] == 5000
-
-
-def _fixed_message_ck1(sk: PrivateKey, message: bytes) -> str:
-    """TODO(deprecated, remove once no such notes are expected to remain in
-    the wild): the current Q||sig shape, but signed over a fixed message
-    instead of the spend transaction's sighash - sha256("LNURLcash"), and
-    before that the raw 9-byte string. Built the way a not-yet-upgraded
-    WALLET still would, so tests can confirm the mint still honors it
-    during the transition (see signing.verify_legacy_ck1)."""
+def _old_ck1s(sk: PrivateKey) -> list[str]:
+    """The ck1 shapes older WALLETs signed, none of which a spend accepts
+    any more: the pre-schnorr bare 65-byte recoverable signature, and the
+    current Q||sig shape signed over a fixed message instead of the spend
+    transaction's sighash (sha256("LNURLcash"), and the raw string)."""
     pk_xonly = sk.public_key.format(compressed=True)[1:]
-    return bech32m.encode("ck", pk_xonly + sign_schnorr_message(sk, message))
+    recoverable = sk.sign_recoverable(lightning_signed_message_digest("LNURLcash"), hasher=None)
+    return [
+        bech32m.encode("ck", recoverable),
+        bech32m.encode("ck", pk_xonly + sign_schnorr_message(sk, sha256(b"LNURLcash").digest())),
+        bech32m.encode("ck", pk_xonly + sign_schnorr_message(sk, b"LNURLcash")),
+    ]
 
 
-def _raw_message_ck1(sk: PrivateKey) -> str:
-    return _fixed_message_ck1(sk, b"LNURLcash")
-
-
-def test_hashed_message_ck1_still_redeems_a_cp1_note(client: TestClient, node: FakeNode):
-    """TODO(deprecated): a ck1 signed over sha256("LNURLcash"), the scheme
-    just before spends moved onto the transaction sighash."""
+def test_old_ck1_shapes_are_refused(client: TestClient, node: FakeNode):
     sk, cp1 = _mint_cp1_note(client, node, 5000)
-    old_k1 = _fixed_message_ck1(sk, sha256(b"LNURLcash").digest())
-    assert client.get(f"/w?k1={old_k1}").json()["maxWithdrawable"] == 5000
-    new_sk, new_cp1 = _note_keypair()
-    assert client.get(f"/w/cb?k1={old_k1}&p1={new_cp1}").json()["status"] == "OK"
-    assert client.get(f"/w?k1={_ck1(new_sk)}").json()["maxWithdrawable"] == 5000
-
-
-def test_raw_message_ck1_still_redeems_a_cp1_note(client: TestClient, node: FakeNode):
-    """TODO(deprecated): a note redeemed with a ck1 signed under the OLD
-    raw-message scheme must still work while the mint stays backwards
-    compatible with a WALLET that hasn't rotated it onto the current
-    hashed-message scheme yet."""
-    sk, cp1 = _mint_cp1_note(client, node, 5000)
-    old_k1 = _raw_message_ck1(sk)
-    data = client.get(f"/w?k1={old_k1}").json()
-    assert data["minWithdrawable"] == data["maxWithdrawable"] == 5000
-
-    new_sk, new_cp1 = _note_keypair()
-    cb = client.get(f"/w/cb?k1={old_k1}&p1={new_cp1}").json()
-    assert cb["status"] == "OK"
-    new_k1 = _ck1(new_sk)
-    assert client.get(f"/w?k1={new_k1}").json()["maxWithdrawable"] == 5000
+    _, new_cp1 = _note_keypair()
+    for old_k1 in _old_ck1s(sk):
+        assert client.get(f"/w?k1={old_k1}").json() == {"status": "ERROR", "reason": "Unknown note."}
+        assert client.get(f"/w/cb?k1={old_k1}&p1={new_cp1}").json()["status"] == "ERROR"
+    assert client.get(f"/w?k1={_ck1(sk)}").json()["maxWithdrawable"] == 5000

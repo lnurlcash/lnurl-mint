@@ -74,11 +74,6 @@ required whenever `pr` is absent; `p2` is additionally required whenever
 "reason": "missing p1"}` (or `"missing p2"`) rather than this mint generating
 a secret on `WALLET`'s behalf.
 
-`h`/`h2` (on `/w/cb`) and `h` (on `/w`) are `p1`/`p2`/`p`'s old names, from
-before the spec renamed them - still accepted for a WALLET that hasn't
-caught up, equivalent in every way, just an older spelling. If both a field
-and its old name are given, the new name wins.
-
 Per the spec, `/w/cb` replies `{"status": "OK"}` for a melt as soon as the note
 is reserved, then pays `pr` asynchronously in the background - it does not wait
 for the outgoing payment to settle before responding. A melted `k1` MUST NOT be
@@ -193,16 +188,6 @@ with that *specific* reason - a `cw1` discloses its whole secret already, so
 explaining its failure can't help anyone guess another. Everything else that
 fails to resolve (a bad `ck1` signature, a note that never existed, or one
 already burned) stays in the same ambiguous "Invalid or already spent k1."
-
-**Deprecated, still accepted** until such notes have aged out: a `ck1` of
-the same `Q ‖ sig` shape signed over the old fixed message
-(`sha256("LNURLcash")`, or before that the raw string), and the pre-schnorr
-bare 65-byte recoverable `ck1` (see `signing.verify_legacy_ck1`,
-`bech32m.decode_ck1_legacy`). A note issued before notes were keyed by `Q`
-sits under its old id `sha256(k1)`: nothing on file tells that apart from a
-key, so it is moved to its `Q` lazily, by the first request that proves the
-link - its preimage as `k1`, or its hash as `p` (see
-`NoteStore.migrate_legacy_note`).
 
 **cx1 registration & lightning-address auto-mint** (`POST /p/{username}`): a
 WALLET claims `{username}` against its own `?cx1=`. A fresh, unclaimed name is

@@ -171,7 +171,7 @@ def test_a2_db_layer_settle_mint_race_returns_amount_to_exactly_one_caller():
     """Two barrier-synced OS threads calling settle_mint directly: the lock +
     atomic compare-and-set hand the value to exactly one of them."""
     ph = sha256(urandom(32)).hexdigest()
-    notes.create_mint(ph, fake_invoice(AMOUNT, ph), AMOUNT)
+    notes.create_mint(ph, fake_invoice(AMOUNT, ph), AMOUNT, ph)
 
     barrier = threading.Barrier(2)
     outcomes: list[int | None] = [None, None]

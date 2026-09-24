@@ -268,33 +268,3 @@ def test_a_bearer_note_spends_in_either_form(client: TestClient, node: FakeNode,
     assert client.get(f"/w?k1={full}").json()["maxWithdrawable"] == 5000
     assert not _refused(_redeem(client, full))
     assert _refused(_redeem(client, k1))  # the same note, already spent
-
-
-def test_a_pre_taproot_bearer_note_migrates_on_first_use(client: TestClient, node: FakeNode):
-    """A note issued before notes were keyed by Q sits under h = sha256(k1).
-    Nothing on file tells that apart from a key; the first spend that
-    reveals the secret moves it to its Q, and it redeems normally."""
-    k1 = urandom(32).hex()
-    h = sha256(bytes.fromhex(k1)).hexdigest()
-    notes.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (h, 7000))
-    notes.conn.commit()
-
-    assert client.get(f"/w?k1={k1}").json()["maxWithdrawable"] == 7000
-    assert notes.note_amount(h) is None
-    assert notes.note_amount(bearer_id(h)) == 7000
-    assert not _refused(_redeem(client, k1))
-
-
-def test_a_pre_taproot_bearer_note_is_found_by_its_hash(client: TestClient, node: FakeNode):
-    k1 = urandom(32).hex()
-    h = sha256(bytes.fromhex(k1)).hexdigest()
-    notes.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (h, 7000))
-    notes.conn.commit()
-    assert client.get(f"/w?p={h}").json()["maxWithdrawable"] == 7000
-    # ...and its hash can't be reused to credit a second note for the same secret
-    k2 = urandom(32).hex()
-    h2 = sha256(bytes.fromhex(k2)).hexdigest()
-    notes.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (h2, 7000))
-    notes.conn.commit()
-    reuse = client.get(f"/p/cb?amount=5000&comment={h2}").json()
-    assert reuse == {"status": "ERROR", "reason": "comment already in use"}

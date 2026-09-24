@@ -1,9 +1,11 @@
 {
   lib,
+  stdenv,
   python3,
   fetchPypi,
   fetchurl,
   makeWrapper,
+  autoPatchelfHook,
   src, # the flake root, passed in from flake.nix (self)
 }:
 
@@ -50,6 +52,56 @@ let
     };
   };
 
+  # not in nixpkgs and not buildable by nix's sandbox (it links Bitcoin
+  # Core's own script interpreter, compiled from a vendored source tree via
+  # CMake/Boost - see ~/repos/lnurlcashkernel). It ships as a prebuilt,
+  # per-arch manylinux wheel (pure ctypes: one `.so` loaded at import time,
+  # no CPython C-API surface), so this fetches that wheel straight from
+  # PyPI instead of trying to rebuild the interpreter from source - same
+  # sha256 as uv.lock. autoPatchelfHook rewires the `.so`'s dynamic loader
+  # from the manylinux image's glibc to nixpkgs' (it links only
+  # libstdc++/libm/libgcc_s/libpthread/libc - no libpython, so no wrapping
+  # needed beyond that).
+  lnurlcashKernelWheels = {
+    x86_64-linux = {
+      url = "https://files.pythonhosted.org/packages/ab/f1/a265669f3dcf6b7cc93f76f25b1df2f71431d26a91d24b874931561a83b7/lnurlcash_kernel-0.1.0-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
+      # sha256, same as uv.lock (hex, not SRI, to avoid a lossy base64 transcription)
+      sha256 = "b01f5142af4081fa5b1ea649800e6c8f718b5d944dfb36f7398c69ac6804e351";
+    };
+    aarch64-linux = {
+      url = "https://files.pythonhosted.org/packages/08/88/77ee8b229ec7a39487f6690c91120d539e7b79e930c2ee5a4fd77f5add77/lnurlcash_kernel-0.1.0-py3-none-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl";
+      sha256 = "cbfcdca96d2a71b8d872d063b571f94d876fc8f375cef6d87b911da805377dbf";
+    };
+  };
+
+  lnurlcashKernel =
+    let
+      wheel =
+        lnurlcashKernelWheels.${stdenv.hostPlatform.system}
+          or (throw "lnurlcash-kernel: no prebuilt wheel for ${stdenv.hostPlatform.system}");
+    in
+    python3Packages.buildPythonPackage {
+      pname = "lnurlcash-kernel";
+      version = "0.1.0";
+      format = "wheel";
+
+      src = fetchurl { inherit (wheel) url sha256; };
+
+      nativeBuildInputs = [ autoPatchelfHook ];
+      buildInputs = [ stdenv.cc.cc.lib ];
+
+      pythonImportsCheck = [ "lnurlcashkernel" ];
+
+      meta = {
+        description = "Verify LUD-25 note (taproot key- and script-path) spends with Bitcoin Core's own script interpreter";
+        license = lib.licenses.mit;
+        platforms = [
+          "x86_64-linux"
+          "aarch64-linux"
+        ];
+      };
+    };
+
   # the runtime dependency set, as a function so the dev shell can reuse it
   # (uvicorn's [standard] extras are spelled out individually - nixpkgs
   # doesn't propagate extras)
@@ -69,6 +121,7 @@ let
       qrcode
       bech32
       coincurve
+      lnurlcashKernel
     ];
 
   # /docs' Swagger UI assets are deliberately not committed to the repo (no

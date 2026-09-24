@@ -126,50 +126,6 @@ def _schnorr_digest(message: str) -> bytes:
     return sha256(message.encode()).digest()
 
 
-# TODO(deprecated, remove once no such notes are expected to remain in the
-# wild): the fixed messages a ck1 signed before LUD-25 moved every spend onto
-# the canonical spend transaction's sighash - sha256("LNURLcash"), and before
-# that the raw, un-hashed string. Same Q || sig shape as a current ck1, so
-# spend.verify falls back to these only once the current sighash has failed.
-_LEGACY_CK1_MESSAGES = (_schnorr_digest(_DOMAIN_TAG), _DOMAIN_TAG.encode())
-
-
-def verify_legacy_ck1(pubkey: bytes, signature: bytes) -> bool:
-    """Whether `signature` is a deprecated ck1 signature by `pubkey` (32-byte
-    x-only) over one of the pre-sighash fixed messages. False (never raises)
-    on a malformed key or signature."""
-    try:
-        return any(PublicKeyXOnly(pubkey).verify(signature, message) for message in _LEGACY_CK1_MESSAGES)
-    except ValueError:
-        return False
-
-
-# TODO(deprecated): the pre-schnorr ck1 shape - a bare 65-byte recoverable
-# ECDSA signature (r || s || recovery-id), no embedded pk, over this same
-# fixed message but digest-wrapped the "Lightning Signed Message" way
-# (unlike the plain schnorr message above). Kept only so notes minted
-# before the schnorr switch remain redeemable during the transition;
-# remove this, along with bech32m.decode_ck1_legacy and _CK1_FIXED_DIGEST,
-# once those have aged out.
-_CK1_FIXED_DIGEST = lightning_signed_message_digest("LNURLcash")
-
-
-def recover_note_pubkey(signature_hex: str) -> bytes:
-    """Recovers the 32-byte x-only public key a legacy `ck1` signature was
-    produced with - spend.py's fallback for a `ck1` that doesn't decode as
-    the current `Q || sig` shape (see bech32m.decode_ck1_legacy). Unlike a
-    current ck1 (checked against the Q it carries), this is a pure recovery:
-    the caller has no prior claim about which note `signature_hex` belongs
-    to, only the raw signature a request supplied as `k1` - the recovered
-    key's x-coordinate IS the note id to look up. Raises ValueError on a
-    malformed signature (wrong length, or one that doesn't recover to a
-    valid point) - the same way a malformed legacy k1 fails HEX32_PATTERN,
-    left to the caller to turn into the ordinary "invalid k1" response."""
-    signature = bytes.fromhex(signature_hex)
-    recovered = PublicKey.from_signature_and_message(signature, _CK1_FIXED_DIGEST, hasher=None)
-    return recovered.format(compressed=True)[1:]
-
-
 # A username registration's ownership proof (router.py's POST/DELETE
 # /p/{username}): a WALLET's signature, with the branch's own index-0
 # secret key ("the first secret" - the same key claim_next_index would
