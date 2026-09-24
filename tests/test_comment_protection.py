@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import FakeNode, bearer_id, fresh_secret, k1_id
+from tests.conftest import FakeNode, bearer_id, fresh_secret, k1_hash, k1_id
 
 VALUE = 21_000
 
@@ -95,7 +95,7 @@ def test_informational_get_lazily_settles_a_comment_protected_mint_without_verif
     """A WALLET need not touch /verify at all to claim a comment-protected
     note - plain GET /w?k1=<secret> (the ordinary LUD-03 informational
     query) must lazily materialize it too, exactly like the no-comment
-    fallback already does for a preimage (see _mint_settled_by_comment)."""
+    fallback already does for a preimage (see _mint_settled_by_note_id)."""
     secret, comment = fresh_secret()
     client.get(f"/p/cb?amount={VALUE}&comment={comment}")
     node.settled.add(sha256(node.last_preimage).hexdigest())
@@ -122,8 +122,8 @@ def test_comment_colliding_with_an_outstanding_note_is_rejected(client: TestClie
     # mint_note only settles the invoice - materialize the note itself
     # (lazy, via the informational GET) before the collision can be hit
     assert client.get(f"/w?k1={existing_k1}").json()["maxWithdrawable"] == VALUE
-    resp = client.get(f"/p/cb?amount={VALUE}&comment={existing_note_id}")
-    assert resp.json() == {"status": "ERROR", "reason": "comment already in use"}
+    resp = client.get(f"/p/cb?amount={VALUE}&comment={k1_hash(existing_k1)}")
+    assert resp.json() == {"status": "ERROR", "reason": "already in use"}
     # the existing note is completely unaffected
     assert notes.note_amount(existing_note_id) == VALUE
 
@@ -134,7 +134,7 @@ def test_comment_colliding_with_another_pending_mint_is_rejected(client: TestCli
     assert first.json()["pr"]
 
     second = client.get(f"/p/cb?amount={VALUE}&comment={comment}")
-    assert second.json() == {"status": "ERROR", "reason": "comment already in use"}
+    assert second.json() == {"status": "ERROR", "reason": "already in use"}
 
 
 def test_comment_protected_note_can_split_rotate_and_merge_like_any_other(client: TestClient, node: FakeNode):

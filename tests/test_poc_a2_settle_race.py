@@ -102,7 +102,7 @@ def test_a2_http_race_materializes_exactly_one_note(client: TestClient, node, mo
     # one, which also means the note ends up keyed by the comment hash
     # (note_id below), not the payment hash `ph` /verify racers poll by:
     # the two now race two genuinely different lazy-settle entry points
-    # (_mint_settled vs _mint_settled_by_comment) against the same
+    # (_mint_settled vs _mint_settled_by_note_id) against the same
     # underlying settle_mint call, a strictly harder version of the
     # original single-entry-point race.
     monkeypatch.setattr(settings, "verify_enabled", True)
@@ -171,7 +171,7 @@ def test_a2_db_layer_settle_mint_race_returns_amount_to_exactly_one_caller():
     """Two barrier-synced OS threads calling settle_mint directly: the lock +
     atomic compare-and-set hand the value to exactly one of them."""
     ph = sha256(urandom(32)).hexdigest()
-    notes.create_mint(ph, fake_invoice(AMOUNT, ph), AMOUNT)
+    notes.create_mint(ph, fake_invoice(AMOUNT, ph), AMOUNT, ph)
 
     barrier = threading.Barrier(2)
     outcomes: list[int | None] = [None, None]

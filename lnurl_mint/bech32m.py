@@ -82,18 +82,6 @@ def _fixed_length_codec(hrp: str, length: int) -> tuple:
 encode_cp1, decode_cp1 = _fixed_length_codec("cp", 32)
 
 
-# TODO(deprecated): the pre-schnorr ck1 shape - a bare 65-byte recoverable
-# ECDSA signature (r || s || recovery-id), no embedded pk, the signer's
-# pubkey recovered via ecrecover instead (see signing.recover_note_pubkey).
-# Kept only so notes minted before the schnorr switch (../luds commit
-# da07aa0) remain redeemable during the transition (see spend.py); remove
-# this, along with signing.recover_note_pubkey and signing._CK1_FIXED_DIGEST,
-# once those have aged out.
-def decode_ck1_legacy(s: str) -> bytes | None:
-    data = decode("ck", s)
-    return data if data is not None and len(data) == 65 else None
-
-
 # cs1<sig>: a 65-byte recoverable signature, produced by SERVICE - an
 # issuance certificate, never a spend authorization on its own. Unlike
 # cp1/cx1, its HRP is not a fixed 2-char one: it carries the

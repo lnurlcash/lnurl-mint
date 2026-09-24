@@ -242,7 +242,7 @@ def test_mints_table_migrates_from_before_lud21(tmp_path):
     store = NoteStore(db_path)
     assert store.pending_mint("deadbeef") == 5000
     assert store.mint_pr("deadbeef") == ""
-    store.create_mint("newhash", "lnbcrt1...", 3000)
+    store.create_mint("newhash", "lnbcrt1...", 3000, "note-new")
     assert store.mint_pr("newhash") == "lnbcrt1..."
 
 
@@ -265,6 +265,45 @@ def test_melts_table_migrates_from_before_mark_melt_settled(tmp_path):
     assert store.melt_settled("deadbeef") is True
 
 
+def test_note_columns_are_renamed(tmp_path):
+    # a database from before these columns were renamed kept a mint's note
+    # in `comment_hash` and a burn's outputs in `h`/`h2` -
+    # the same hex(Q) values, carried over by a plain column rename
+    db_path = str(tmp_path / "pre-cp1.db")
+    q, q2, q3 = "aa" * 32, "bb" * 32, "cc" * 32
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE notes (id TEXT PRIMARY KEY, amount_msat INTEGER NOT NULL,"
+        " spent INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0, pending_payment_hash TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE mints (payment_hash TEXT PRIMARY KEY, pr TEXT NOT NULL, amount_msat INTEGER NOT NULL,"
+        " minted INTEGER NOT NULL DEFAULT 0, comment_hash TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE burns (burn_key TEXT PRIMARY KEY, h TEXT NOT NULL, h2 TEXT,"
+        " amount1_msat INTEGER NOT NULL, amount2_msat INTEGER)"
+    )
+    conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, 2000)", (q,))
+    conn.execute(
+        "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash) VALUES ('ph', 'lnbcrt1...', 3000, ?)", (q2,)
+    )
+    conn.execute("INSERT INTO burns (burn_key, h, h2, amount1_msat, amount2_msat) VALUES ('old', ?, ?, 1, 2)", (q3, q))
+    conn.commit()
+    conn.close()
+
+    store = NoteStore(db_path)
+    columns = {t: {r[1] for r in store.conn.execute(f"PRAGMA table_info({t})")} for t in ("notes", "mints", "burns")}
+    assert "id" in columns["notes"] and "cp1" not in columns["notes"]
+    assert "note_id" in columns["mints"] and "comment_hash" not in columns["mints"]
+    assert {"id", "id2"} <= columns["burns"] and not {"h", "h2"} & columns["burns"]
+    assert store.note_amount(q) == 2000
+    assert store.pending_mint_by_note_id(q2) == ("ph", 3000)
+    assert store.find_burn(["old"]) == (q3, q, 1, 2)
+    # and opening it again is a no-op
+    assert NoteStore(db_path).note_amount(q) == 2000
+
+
 def test_outstanding_msat_is_zero_for_a_fresh_store(tmp_path):
     store = NoteStore(str(tmp_path / "notes.db"))
     assert store.outstanding_msat() == 0
@@ -272,9 +311,9 @@ def test_outstanding_msat_is_zero_for_a_fresh_store(tmp_path):
 
 def test_outstanding_msat_sums_every_materialized_note(tmp_path):
     store = NoteStore(str(tmp_path / "notes.db"))
-    store.create_mint("hash-a", "lnbcrt1...", 2000)
+    store.create_mint("hash-a", "lnbcrt1...", 2000, "note-a")
     store.settle_mint("hash-a")
-    store.create_mint("hash-b", "lnbcrt1...", 3000)
+    store.create_mint("hash-b", "lnbcrt1...", 3000, "note-b")
     store.settle_mint("hash-b")
     assert store.outstanding_msat() == 5000
 
@@ -284,7 +323,7 @@ def test_outstanding_msat_ignores_a_settled_mint_never_materialized(tmp_path):
     # what materializes the `mints` row into a `notes` row - see
     # NoteStore.outstanding_msat's own docstring for why)
     store = NoteStore(str(tmp_path / "notes.db"))
-    store.create_mint("hash-a", "lnbcrt1...", 2000)
+    store.create_mint("hash-a", "lnbcrt1...", 2000, "note-a")
     assert store.outstanding_msat() == 0
 
 
@@ -293,9 +332,9 @@ def test_outstanding_msat_includes_a_pending_note(tmp_path):
     # outstanding until its melt actually settles - per LUD-25, SERVICE
     # MUST NOT burn it until then
     store = NoteStore(str(tmp_path / "notes.db"))
-    store.create_mint("hash-a", "lnbcrt1...", 2000)
+    store.create_mint("hash-a", "lnbcrt1...", 2000, "note-a")
     store.settle_mint("hash-a")
-    store.mark_pending(["hash-a"], "melt-payment-hash")
+    store.mark_pending(["note-a"], "melt-payment-hash")
     assert store.outstanding_msat() == 2000
 
 
@@ -305,9 +344,9 @@ def test_outstanding_msat_survives_a_swap(tmp_path):
     # burned one(s), and stay the same when their combined value doesn't
     # change (a plain rotate)
     store = NoteStore(str(tmp_path / "notes.db"))
-    store.create_mint("hash-a", "lnbcrt1...", 2000)
+    store.create_mint("hash-a", "lnbcrt1...", 2000, "note-a")
     store.settle_mint("hash-a")
-    store.swap(["hash-a"], ["new-hash"], [2000])
+    store.swap(["note-a"], ["new-hash"], [2000])
     assert store.outstanding_msat() == 2000
 
 
@@ -315,9 +354,9 @@ def test_outstanding_msat_drops_after_finalize_melt(tmp_path):
     # unlike a swap, a melt (finalize_melt) burns a note with no
     # replacement - the total must actually go down
     store = NoteStore(str(tmp_path / "notes.db"))
-    store.create_mint("hash-a", "lnbcrt1...", 2000)
+    store.create_mint("hash-a", "lnbcrt1...", 2000, "note-a")
     store.settle_mint("hash-a")
-    store.create_mint("hash-b", "lnbcrt1...", 3000)
+    store.create_mint("hash-b", "lnbcrt1...", 3000, "note-b")
     store.settle_mint("hash-b")
-    store.finalize_melt(["hash-a"])
+    store.finalize_melt(["note-a"])
     assert store.outstanding_msat() == 3000

@@ -1,4 +1,4 @@
-"""LUD-25 Part 2, Seed & derivation's cx1 registration (router.py's
+"""LUD-25 Seed & derivation's cx1 registration (router.py's
 POST/DELETE /p/{username}): a WALLET claims a Lightning Address username
 against its own watch-only branch, and this mint auto-mints cp1 notes off
 it directly. Every register/unregister call needs an ownership-proof
@@ -107,7 +107,7 @@ def _note_value(client: TestClient, note_id_hex: str) -> int | None:
     settle-on-first-lookup materialization (see NoteStore.settle_mint) -
     unlike poking NoteStore.note_amount directly, this is what actually
     makes a freshly settled mint invoice become a queryable note."""
-    data = client.get(f"/w?p={note_id_hex}").json()
+    data = client.get(f"/w?p={bech32m.encode_cp1(bytes.fromhex(note_id_hex))}").json()
     return data.get("maxWithdrawable")
 
 
@@ -443,7 +443,7 @@ def test_internal_transfer_to_a_stale_index_is_rejected_like_any_collision(
 
     second_k1 = mint_note(2000)
     resp = client.get(f"/w/cb?k1={second_k1}&p1={cp1}")
-    assert resp.json() == {"status": "ERROR", "reason": "Output already in use."}
+    assert resp.json() == {"status": "ERROR", "reason": "already in use"}
     # the first transfer's note is untouched, the second sender's note
     # was never burned
     assert _note_value(client, pk0.hex()) == 3000
@@ -461,6 +461,22 @@ def test_paying_registered_address_with_no_comment_automints(client: TestClient,
     node.settled.add(_payment_hash(node))
 
     expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
+    assert _note_value(client, expected_id) == 5000
+
+
+def test_hex_lookup_of_an_automint_key_leaves_the_note_alone(client: TestClient, node: FakeNode):
+    """A 64-hex `p` is a bearer note's short form: it names that bearer note's
+    Q, never the cp1 note stored under the same 32 bytes."""
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "hexa")
+    client.post(f"/p/hexa?cx1={cx1}&sig={sig}")
+
+    lnaddress = client.get("/.well-known/lnurlp/hexa").json()
+    client.get(f"{lnaddress['callback']}?amount=5000")
+    node.settled.add(_payment_hash(node))
+
+    expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
+    assert client.get(f"/w?p={expected_id}").json()["reason"] == "Unknown note."
     assert _note_value(client, expected_id) == 5000
 
 
@@ -632,8 +648,8 @@ def test_automint_works_with_mixed_case_username_in_callback(client: TestClient,
     assert pay_response.json().get("pr"), pay_response.text
     node.settled.add(_payment_hash(node))
 
-    expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
-    data = client.get(f"/w?p={expected_id}").json()
+    expected_cp1 = bech32m.encode_cp1(derivation.derive_pubkey(branch_point, chain_code, 0))
+    data = client.get(f"/w?p={expected_cp1}").json()
     assert data.get("maxWithdrawable") == 5000, data
 
 

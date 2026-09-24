@@ -27,6 +27,7 @@ from hashlib import sha256
 import pytest
 from fastapi.testclient import TestClient
 
+from lnurl_mint import bech32m
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from lnurl_mint.router import _mint_fee_msat
@@ -343,7 +344,7 @@ def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     # merge onto an EXISTING outstanding note id: INSERT collides, rolls back
     k1c = ledger.mint(100_000)
     existing_id = _note_id(k1)
-    r = ledger.client.get(f"/w/cb?k1={k1c}&p1={existing_id}")
+    r = ledger.client.get(f"/w/cb?k1={k1c}&p1={bech32m.encode_cp1(bytes.fromhex(existing_id))}")
     assert r.json()["status"] == "ERROR"
     assert notes.note_amount(_note_id(k1c)) == 99_000
     assert notes.note_amount(existing_id) == 99_000

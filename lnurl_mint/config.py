@@ -139,7 +139,7 @@ class Settings(BaseSettings):
     # preimage is a bearer secret here, not mere proof of payment.
     verify_enabled: bool = True
 
-    # LUD-25 Part 2 (optional): serve POST/DELETE /p/{username}, letting a
+    # LUD-25 (optional): serve POST/DELETE /p/{username}, letting a
     # WALLET claim a Lightning Address username against its own cx1 branch
     # (see router.upsert_registered_username) - this mint then auto-mints
     # for every payment it receives there, no per-payment WALLET

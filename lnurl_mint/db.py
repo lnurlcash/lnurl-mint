@@ -18,7 +18,7 @@ class OutputCollisionError(ValueError):
     """Raised when a replacement note id is already registered."""
 
     def __init__(self, note_id: str) -> None:
-        super().__init__("Output already in use.")
+        super().__init__("already in use")
         self.note_id = note_id
 
 
@@ -33,10 +33,6 @@ class NoteStore:
     outstanding and for how much, but lets nobody spend them: this mint never
     has a spend to begin with, on top of never persisting one.
 
-    One older id shape may still be on file (see migrate_legacy_note): a
-    note issued before notes were keyed by Q is stored under its bearer
-    secret's hash h = sha256(k1) - for a mint that skipped comment
-    protection, exactly the funding invoice's payment hash.
     Burned notes are kept with spent=1 rather than deleted, so a
     replayed k1 fails as "already spent" instead of dangling.
 
@@ -45,7 +41,7 @@ class NoteStore:
     request fails and no note may be burned or minted.
 
     Also holds `usernames` (upsert_username/username_branch/
-    claim_next_index): LUD-25 Part 2's cx1 registration, letting a WALLET
+    claim_next_index): LUD-25's cx1 registration, letting a WALLET
     claim a Lightning Address that auto-mints `cp1` notes off its own
     branch. This is the one piece of durable per-caller state this mint
     keeps beyond bearer notes themselves - a public key binding, never a
@@ -81,7 +77,7 @@ class NoteStore:
                 " pr TEXT NOT NULL,"  # LUD-21 verify only, never the secret
                 " amount_msat INTEGER NOT NULL,"
                 " minted INTEGER NOT NULL DEFAULT 0,"
-                " comment_hash TEXT)"  # hex(Q) of the note this mint credits, see create_mint
+                " note_id TEXT)"  # the note this mint credits, as hex(Q), see create_mint
             )
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS melts ("
@@ -92,17 +88,23 @@ class NoteStore:
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS burns ("
                 " burn_key TEXT PRIMARY KEY,"  # sorted, '|'-joined note ids burned together, see _burn_key
-                " h TEXT NOT NULL,"
-                " h2 TEXT,"  # NULL unless this burn was a split
-                " amount1_msat INTEGER NOT NULL,"  # value minted under h
-                " amount2_msat INTEGER)"  # value minted under h2; NULL unless a split
+                " id TEXT NOT NULL,"  # the note minted (p1), as hex(Q)
+                " id2 TEXT,"  # the change note (p2), as hex(Q); NULL unless this burn was a split
+                " amount1_msat INTEGER NOT NULL,"  # value minted under id
+                " amount2_msat INTEGER)"  # value minted under id2; NULL unless a split
             )
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS usernames ("
                 " username TEXT PRIMARY KEY,"
-                " cx1 TEXT NOT NULL,"  # hex(P || chain_code), LUD-25 Part 2's watch-only branch export
+                " cx1 TEXT NOT NULL,"  # hex(P || chain_code), LUD-25's watch-only branch export
                 " next_index INTEGER NOT NULL DEFAULT 0)"  # see claim_next_index
             )
+            # databases from before these columns were renamed: a mint's note
+            # was `comment_hash`, and a burn's outputs `h`/`h2` - the same
+            # hex(Q) values, only renamed
+            self._rename_column_if_present(self._conn, "mints", "comment_hash", "note_id")
+            self._rename_column_if_present(self._conn, "burns", "h", "id")
+            self._rename_column_if_present(self._conn, "burns", "h2", "id2")
             # add-a-column migrations for databases created before that
             # column existed - this mint has no other migration mechanism,
             # so the alternative would be telling an operator to delete
@@ -124,9 +126,9 @@ class NoteStore:
             # touches them, same as any other pre-migration NULL
             self._add_column_if_missing(self._conn, "notes", "pending_payment_hash", "TEXT")
             # a database from before LUD-25 comment protection has no
-            # `comment_hash` on `mints` - existing rows predate it entirely,
-            # so they get NULL, same as any mint that skipped it
-            self._add_column_if_missing(self._conn, "mints", "comment_hash", "TEXT")
+            # `note_id` (nor `comment_hash`) on `mints` - existing rows predate
+            # it entirely, so they get NULL and never settle into a note
+            self._add_column_if_missing(self._conn, "mints", "note_id", "TEXT")
             # when this mint credited a note - where a spend's relative
             # timelock (BIP-68, via lnurlcashkernel) starts counting. Rows
             # from before it get 0: credited "long ago", the right answer
@@ -166,40 +168,43 @@ class NoteStore:
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_suffix}")
 
+    @staticmethod
+    def _rename_column_if_present(conn: sqlite3.Connection, table: str, old: str, new: str) -> None:
+        """`ALTER TABLE table RENAME COLUMN old TO new`, if `old` is still
+        there - table/column always come from literals in this file."""
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if old in columns and new not in columns:
+            conn.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+
     def create_mint(
         self,
         payment_hash: str,
         pr: str,
         amount_msat: int,
-        comment_hash: str | None = None,
+        note_id: str,
         zap_request: str | None = None,
-        also_reserved: tuple[str, ...] = (),
     ) -> None:
         """Record an invoice that becomes a note worth `amount_msat` once it
         settles (see settle_mint). Only the payment hash and the invoice
         itself (`pr`, for LUD-21 verify) are stored.
 
-        `comment_hash` is hex(Q) of the note to credit, from the `cp1` (or a
+        `note_id` is hex(Q) of the note to credit, from the `cp1` (or a
         bearer note's hex `h`) a WALLET sent as the LUD-12 `comment`, or
         derived by this mint for a registered Lightning Address. Raises
         ValueError, recording nothing, if it collides with an id already in
         use, either a note or another mint's - a WALLET generating a fresh
-        note each time should never hit this honestly. `also_reserved`
-        names further ids to check (a bearer note's pre-taproot id, see
-        migrate_legacy_note).
+        note each time should never hit this honestly.
 
         `zap_request` is the NIP-57 kind 9734 the invoice was bound to,
         verbatim, for the receipt published once it settles (see
         unpublished_zaps)."""
         with self._lock, self.conn:
-            if comment_hash is not None:
-                for note_id in (comment_hash, *also_reserved):
-                    if self._id_in_use(note_id):
-                        raise ValueError("comment already in use")
+            if self._id_in_use(note_id):
+                raise ValueError("already in use")
             self.conn.execute(
-                "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash, zap_request, created_at)"
+                "INSERT INTO mints (payment_hash, pr, amount_msat, note_id, zap_request, created_at)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
-                (payment_hash, pr, amount_msat, comment_hash, zap_request, int(time.time())),
+                (payment_hash, pr, amount_msat, note_id, zap_request, int(time.time())),
             )
 
     def _id_in_use(self, note_id: str) -> bool:
@@ -208,9 +213,8 @@ class NoteStore:
         new note under it would collide. Caller holds the lock."""
         return (
             self.conn.execute(
-                "SELECT 1 FROM notes WHERE id = ?"
-                " UNION SELECT 1 FROM mints WHERE comment_hash = ? OR (comment_hash IS NULL AND payment_hash = ?)",
-                (note_id, note_id, note_id),
+                "SELECT 1 FROM notes WHERE id = ? UNION SELECT 1 FROM mints WHERE note_id = ?",
+                (note_id, note_id),
             ).fetchone()
             is not None
         )
@@ -254,14 +258,14 @@ class NoteStore:
         ).fetchone()
         return row[0] if row else None
 
-    def pending_mint_by_comment(self, comment_hash: str) -> tuple[str, int] | None:
+    def pending_mint_by_note_id(self, note_id: str) -> tuple[str, int] | None:
         """(payment_hash, amount_msat) of the not-yet-minted invoice whose
-        LUD-25 comment protection hash is `comment_hash`, if any - the
+        note is `note_id`, if any - the
         comment-keyed counterpart to pending_mint, used to lazily settle a
         note looked up by its WALLET-chosen secret rather than by the
-        funding invoice's own payment hash (see router._mint_settled_by_comment)."""
+        funding invoice's own payment hash (see router._mint_settled_by_note_id)."""
         row = self.conn.execute(
-            "SELECT payment_hash, amount_msat FROM mints WHERE comment_hash = ? AND minted = 0", (comment_hash,)
+            "SELECT payment_hash, amount_msat FROM mints WHERE note_id = ? AND minted = 0", (note_id,)
         ).fetchone()
         return (row[0], row[1]) if row else None
 
@@ -273,7 +277,7 @@ class NoteStore:
         entire bearer secret and verify would hand it to anyone holding the
         verify URL, not just the payer. Once a comment was used, the
         preimage redeems nothing, so verify is unconditionally safe there."""
-        row = self.conn.execute("SELECT comment_hash FROM mints WHERE payment_hash = ?", (payment_hash,)).fetchone()
+        row = self.conn.execute("SELECT note_id FROM mints WHERE payment_hash = ?", (payment_hash,)).fetchone()
         return bool(row and row[0] is not None)
 
     def mint_pr(self, payment_hash: str) -> str | None:
@@ -294,22 +298,21 @@ class NoteStore:
 
     def settle_mint(self, payment_hash: str) -> int | None:
         """Turn a settled mint invoice into an outstanding note, under the
-        comment_hash create_mint recorded (already checked not to collide) -
-        or, for a mint from before comment protection was mandatory, under
-        its payment hash (a pre-taproot id, see migrate_legacy_note).
+        note_id create_mint recorded (already checked not to collide).
         Returns its value, or None if a concurrent request already minted it
-        (in which case the note already exists and note_amount finds it)."""
+        (in which case the note already exists and note_amount finds it), or
+        if the mint names no note at all."""
         with self._lock, self.conn:
             cursor = self.conn.execute(
-                "UPDATE mints SET minted = 1 WHERE payment_hash = ? AND minted = 0", (payment_hash,)
+                "UPDATE mints SET minted = 1 WHERE payment_hash = ? AND minted = 0 AND note_id IS NOT NULL",
+                (payment_hash,),
             )
             if cursor.rowcount != 1:
                 return None
             row = self.conn.execute(
-                "SELECT amount_msat, comment_hash FROM mints WHERE payment_hash = ?", (payment_hash,)
+                "SELECT amount_msat, note_id FROM mints WHERE payment_hash = ?", (payment_hash,)
             ).fetchone()
-            amount_msat, comment_hash = row
-            note_id = comment_hash if comment_hash is not None else payment_hash
+            amount_msat, note_id = row
             self.conn.execute(
                 "INSERT INTO notes (id, amount_msat, locked_at) VALUES (?, ?, ?)",
                 (note_id, amount_msat, int(time.time())),
@@ -325,23 +328,6 @@ class NoteStore:
             "SELECT amount_msat, locked_at, spent, pending FROM notes WHERE id = ?", (note_id,)
         ).fetchone()
         return (row[0], row[1], bool(row[2]), bool(row[3])) if row else None
-
-    def migrate_legacy_note(self, legacy_id: str, note_id: str) -> None:
-        """Move a note stored under its pre-taproot id (h = sha256 of its
-        bearer secret) to its LUD-25 id, hex(Q) of the bearer note that same
-        secret spends. Done lazily, by the first request that proves the
-        link - a spend revealing the secret, or its hex `h` - since nothing
-        on file tells a pre-taproot hash apart from a `cp1` key: both are 32
-        bytes of hex. A no-op if nothing is stored under `legacy_id`, or
-        something already is under `note_id`. A pending mint that will
-        credit `legacy_id` is repointed too."""
-        with self._lock, self.conn:
-            if self.conn.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,)).fetchone():
-                return
-            self.conn.execute("UPDATE notes SET id = ? WHERE id = ?", (note_id, legacy_id))
-            self.conn.execute(
-                "UPDATE mints SET comment_hash = ? WHERE comment_hash = ? AND minted = 0", (note_id, legacy_id)
-            )
 
     def note_amount(self, note_id: str) -> int | None:
         """Value of the outstanding (unspent) note with id `note_id`
@@ -439,8 +425,8 @@ class NoteStore:
                     seen_mint_ids: set[str] = set()
                     for note_id in mint_note_ids:
                         if self.conn.execute(
-                            "SELECT 1 FROM mints WHERE comment_hash = ? OR (comment_hash IS NULL AND payment_hash = ?)",
-                            (note_id, note_id),
+                            "SELECT 1 FROM mints WHERE note_id = ?",
+                            (note_id,),
                         ).fetchone():
                             # the note some mint invoice will credit: as taken
                             # as one already on file, per LUD-25
@@ -461,7 +447,7 @@ class NoteStore:
                             (note_id, amount_msat, locked_at),
                         )
                     self.conn.execute(
-                        "INSERT INTO burns (burn_key, h, h2, amount1_msat, amount2_msat) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO burns (burn_key, id, id2, amount1_msat, amount2_msat) VALUES (?, ?, ?, ?, ?)",
                         (
                             self._burn_key(burn_ids),
                             mint_note_ids[0],
@@ -486,7 +472,7 @@ class NoteStore:
 
     def find_burn(self, note_ids: list[str]) -> tuple[str, str | None, int, int | None] | None:
         """If `note_ids`, as a set, were burned together by one earlier
-        rotate/split/merge (see swap), returns the (h, h2, amount1_msat,
+        rotate/split/merge (see swap), returns the (id, id2, amount1_msat,
         amount2_msat) that burn produced - everything router.py's LUD-25
         retry handling (Retrying a mutation) needs to answer a retried
         callback with the original result instead of "already spent".
@@ -494,7 +480,7 @@ class NoteStore:
         single swap - including when it only partially overlaps one, which
         is a genuine conflict, not a replay, and must still fail normally."""
         row = self.conn.execute(
-            "SELECT h, h2, amount1_msat, amount2_msat FROM burns WHERE burn_key = ?", (self._burn_key(note_ids),)
+            "SELECT id, id2, amount1_msat, amount2_msat FROM burns WHERE burn_key = ?", (self._burn_key(note_ids),)
         ).fetchone()
         return tuple(row) if row else None
 
@@ -607,7 +593,7 @@ class NoteStore:
 
     def upsert_username(self, username: str, cx1_hex: str, nostr_pubkey_hex: str | None = None) -> None:
         """Claims `username` for the watch-only branch `cx1_hex` (LUD-25
-        Part 2's cx1 = hex(P || chain_code)), or wholesale replaces an
+        cx1 = hex(P || chain_code)), or wholesale replaces an
         existing claim's branch/npub with this call's own (see router.py's
         POST /p/{username}) - router.py gates every call behind its own
         ownership-proof signature before ever calling this (a fresh claim
@@ -656,7 +642,7 @@ class NoteStore:
 
     def next_index_hint(self, username: str) -> int | None:
         """The persisted best-known next-unused index on `username`'s
-        registered branch (LUD-25 Part 2's Internal mint transfers,
+        registered branch (LUD-25's Internal transfer,
         router.get_lnaddress's `text/xpub` metadata entry) - a plain read
         of the same `next_index` column claim_next_index reserves from,
         with none of its collision-skipping. Purely advisory ("`i` is
@@ -678,7 +664,7 @@ class NoteStore:
         into an index a pending rotate/split/merge might also be about to
         install. Persists next_index past the winner and returns
         (pk_hex, index) for the caller to mint under, exactly like a
-        WALLET-supplied comment_hash. Raises ValueError if `username` was
+        WALLET-supplied cp1. Raises ValueError if `username` was
         never registered."""
         with self._lock, self.conn:
             row = self.conn.execute("SELECT next_index FROM usernames WHERE username = ?", (username,)).fetchone()

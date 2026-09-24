@@ -16,7 +16,7 @@ class LnurlPayResponse(BaseModel):
     here. `comment` is mandatory on the fixed identity's callback, which
     has no other key to mint under (missing or malformed rejects the mint
     outright), unlike LUD-12's own optional/free-text default use. On a
-    Part 2 cx1-registered username it is not: that address has a branch to
+    cx1-registered username it is not: that address has a branch to
     mint on, so a comment naming no output is the free text
     `commentAllowed` invites and is ignored rather than refused.
 
@@ -95,9 +95,9 @@ class LnurlWithdrawResponse(BaseModel):
     signing key - omitted entirely if no funding source is configured
     (see signing.mint_pubkey).
 
-    `sig` (Part 2 Offline verification, optional) is a ready-made `cs1`
-    certificate for a `cp1` note looked up by its own `ck1` - see
-    router.get_withdraw. Omitted for a legacy Part 1 note or a `p`-lookup."""
+    `sig` (Offline verification, optional) is a ready-made `cs1` certificate
+    for the note, whether looked up by a spend (`k1`) or by `p` - see
+    router.get_withdraw. Omitted if signing isn't available right now."""
 
     tag: Literal["withdrawRequest"] = "withdrawRequest"
     callback: str
@@ -182,7 +182,7 @@ class WithdrawSuccessResponse(BaseModel):
 
 
 class RegisterUsernameResponse(BaseModel):
-    """LUD-25 Part 2's cx1 registration (router's POST/DELETE
+    """LUD-25's cx1 registration (router's POST/DELETE
     /p/{username}) - claims or frees `username` for/from a WALLET's
     watch-only branch. A fresh claim is first-come-first-served, no proof
     of possession; overwriting or deleting an existing one needs an

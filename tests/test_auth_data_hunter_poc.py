@@ -95,7 +95,7 @@ def test_f4_rotate_onto_pending_mint_rejected_victim_unharmed(client: TestClient
     # the squat on the note the victim's mint will credit fails atomically
     # - nothing planted, nothing burned
     r1 = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_comment}")
-    assert r1.json() == {"status": "ERROR", "reason": "Output already in use."}, r1.text
+    assert r1.json() == {"status": "ERROR", "reason": "already in use"}, r1.text
     assert notes.note_amount(bearer_id(victim_comment)) is None  # no squatter row
     attacker_id = k1_id(attacker_k1)
     assert notes.note_amount(attacker_id) == 10_000  # attacker's note intact

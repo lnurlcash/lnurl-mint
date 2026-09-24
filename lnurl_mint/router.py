@@ -273,17 +273,17 @@ def _created_invoice_payment_hash(pr: str) -> str:
     return decoded.payment_hash
 
 
-async def _mint_settled_by_comment(comment_hash: str) -> bool:
+async def _mint_settled_by_note_id(note_id: str) -> bool:
     """Whether the LUD-25 comment-protected mint whose secret hashes to
-    `comment_hash` has settled - lazily materializes the resulting note
-    (keyed by `comment_hash` itself, see NoteStore.settle_mint) the first
+    `note_id` has settled - lazily materializes the resulting note
+    (keyed by `note_id` itself, see NoteStore.settle_mint) the first
     time settlement is observed, mirroring _mint_settled's payment-hash
     path but keyed by the WALLET-chosen secret hash instead. Used by
     _note_amount_by_id as a fallback when `note_id` doesn't name a
     payment hash directly - which is always the case once a comment was
     used, since the note's id is then unrelated to the invoice that paid
     for it."""
-    pending = notes.pending_mint_by_comment(comment_hash)
+    pending = notes.pending_mint_by_note_id(note_id)
     if pending is None:
         return False
     payment_hash, _ = pending
@@ -406,27 +406,13 @@ async def _note_amount_by_id(note_id: str) -> int | None:
     was never minted, or it has already been spent (rotated/split/merged/
     melted away). Materializes a note whose mint invoice has settled but
     that nothing has asked about yet (see NoteStore.settle_mint), by the
-    comment it was minted under, or - for a mint from before comment
-    protection was mandatory - its payment hash."""
+    comment it was minted under."""
     amount_msat = notes.note_amount(note_id)
     if amount_msat is not None:
         return amount_msat
-    if await _mint_settled(note_id):
-        return notes.note_amount(note_id)
-    if await _mint_settled_by_comment(note_id):
+    if await _mint_settled_by_note_id(note_id):
         return notes.note_amount(note_id)
     return None
-
-
-async def _materialize(note_id: str, legacy_id: str | None) -> None:
-    """Brings the note `note_id` on file if it exists at all: settles its
-    mint if that was paid but never asked about, and moves a bearer note
-    issued before notes were keyed by Q from its old id `legacy_id` (see
-    NoteStore.migrate_legacy_note)."""
-    if legacy_id is not None:
-        await _note_amount_by_id(legacy_id)
-        notes.migrate_legacy_note(legacy_id, note_id)
-    await _note_amount_by_id(note_id)
 
 
 class _Rejected(Exception):
@@ -451,7 +437,7 @@ async def _verified_note(k1: str) -> tuple[str, int, bool, bool]:
     parsed = spend.parse(k1)
     if parsed is None:
         raise _Rejected(_INVALID_K1)
-    await _materialize(parsed.note_id, parsed.legacy_hash)
+    await _note_amount_by_id(parsed.note_id)
     record = notes.note_record(parsed.note_id)
     if record is None:
         raise _Rejected(_INVALID_K1)
@@ -464,13 +450,12 @@ async def _verified_note(k1: str) -> tuple[str, int, bool, bool]:
 
 async def _note_by_ref(value: str) -> str | None:
     """The note id `value` names where a `cp1` goes (?p=, and every other
-    cp1-shaped input): a `cp1`, or a bearer note's hex `h` - migrating a
-    note stored under that `h` itself first (see _materialize). None if
-    `value` is neither."""
+    cp1-shaped input): a `cp1`, or a bearer note's hex `h` (its short form).
+    None if `value` is neither."""
     note_id = spend.decode_note(value)
     if note_id is None:
         return None
-    await _materialize(note_id, spend.legacy_hash(value))
+    await _note_amount_by_id(note_id)
     return note_id
 
 
@@ -666,7 +651,7 @@ def _owns_branch(action: str, domain: str, username: str, branch_hex: str, sig_h
 def upsert_registered_username(
     req: Request, username: str, cx1: str, sig: str, npub: str | None = None
 ) -> RegisterUsernameResponse:
-    """LUD-25 Part 2, Seed & derivation's cx1 registration: claims
+    """LUD-25 Seed & derivation's cx1 registration: claims
     `username` for a WALLET's watch-only branch export (`cx1<P || chain
     code>`), so paying `.well-known/lnurlp/{username}` with no comment
     auto-mints a fresh `cp1` note directly on that branch for every payment
@@ -797,7 +782,7 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     identity's payRequest entry point.
 
     Also answers for any `username` registered via POST /p/{username}
-    (LUD-25 Part 2's cx1 auto-mint - see get_pay_callback_for_username):
+    (LUD-25's cx1 auto-mint - see get_pay_callback_for_username):
     such a username's own callback is `/p/{username}` itself, a distinct
     path rather than a query parameter on the fixed identity's `/p/cb` -
     so get_pay_callback_for_username knows which registered branch to
@@ -805,7 +790,7 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     Unregistered, unrecognized names still 404.
 
     A registered username's metadata additionally carries a `text/xpub`
-    entry (LUD-25 Part 2's Internal mint transfers): this same branch's
+    entry (LUD-25's Internal transfer): this same branch's
     own `cx1`, appended with `:<i>`, the best-known next-unused index on
     it (NoteStore.next_index_hint). A payer's WALLET already holding a
     `cp1`/`ck1` note on this same mint can read that straight off this
@@ -945,7 +930,7 @@ async def _pay_callback(
     settles, that preimage is an outstanding bearer note worth `amount`
     minus the advertised mint fee, if any (see _mint_fee_msat). Shared by
     get_pay_callback (this mint's own fixed identity, `username`/`branch`
-    both None) and get_pay_callback_for_username (a Part 2 cx1-registered
+    both None) and get_pay_callback_for_username (a cx1-registered
     Lightning Address, `branch` its own derivation branch, already
     resolved and lowercased by the caller - see that function's own
     docstring for why the split exists).
@@ -1002,21 +987,18 @@ async def _pay_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, problem)
         zap_request = nostr
 
-    comment_hash = spend.decode_note(comment) if comment is not None else None
-    # a bearer note's hex `h` may still name a note stored under that `h`
-    # itself (see NoteStore.migrate_legacy_note) - reserved just the same
-    legacy_id = spend.legacy_hash(comment) if comment_hash is not None and comment is not None else None
-    if comment_hash is None and branch is not None:
+    note_id = spend.decode_note(comment) if comment is not None else None
+    if note_id is None and branch is not None:
         # registered username: a comment that isn't a note ref (a payer's
         # WALLET sending an ordinary human LUD-12 message, or nothing at
         # all - e.g. a zap) doesn't block minting - auto-mint on this
         # username's own branch instead (see this function's own docstring)
         branch_point, chain_code = branch[:32], branch[32:]
         assert username is not None
-        comment_hash, _ = notes.claim_next_index(
+        note_id, _ = notes.claim_next_index(
             username, lambda i: derivation.derive_pubkey(branch_point, chain_code, i).hex()
         )
-    elif comment_hash is None:
+    elif note_id is None:
         raise HTTPException(
             HTTPStatus.BAD_REQUEST,
             "Missing or malformed comment: a cp1<Q>, or a bearer note's hex-encoded "
@@ -1048,9 +1030,8 @@ async def _pay_callback(
             payment_hash,
             pr,
             net_amount_msat,
-            comment_hash,
+            note_id,
             zap_request=zap_request,
-            also_reserved=(legacy_id,) if legacy_id is not None else (),
         )
     except ValueError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
@@ -1081,7 +1062,7 @@ async def get_pay_callback(
 async def get_pay_callback_for_username(
     req: Request, username: str, amount: int, comment: str | None = None, nostr: str | None = None
 ) -> LnurlPayActionResponse:
-    """LUD-06 callback for a Part 2 cx1-registered Lightning Address
+    """LUD-06 callback for a cx1-registered Lightning Address
     (get_lnaddress's own callback for a registered `username`, never a
     payer's choice to redirect elsewhere - a request naming a `username`
     nobody registered 404s here exactly like an unknown one anywhere
@@ -1179,7 +1160,6 @@ async def get_withdraw(
     req: Request,
     k1: str | None = None,
     p: str | None = None,
-    h: str | None = None,
     amount: int | None = None,
 ) -> LnurlWithdrawResponse:
     """LUD-03 withdrawRequest for a bearer note. Purely informational: it
@@ -1204,12 +1184,6 @@ async def get_withdraw(
     unknown `k1`; a retained spent note returns "Note already spent." with
     either lookup form.
 
-    `h` is `p`'s old name, kept purely for backwards compatibility with a
-    WALLET built against a pre-rename mint (see this codebase's own history
-    - the spec itself has since renamed this field to `p`) - equivalent to
-    `p` in every way, just an older spelling. If both are given, `p` wins;
-    a WALLET should only ever send one or the other, never both.
-
     `amount` is accepted only because a note's URL encodes a
     (wallet-declared, unauthoritative) value as `?k1=...&amount=...` - it
     MUST be ignored here, never as a stand-in for the actual note value.
@@ -1227,7 +1201,6 @@ async def get_withdraw(
     certificate isn't a spend authorization - just this mint's signature
     over (Q, amount) - so handing one out for `p` never requires proof the
     caller holds the note's spend."""
-    p = p if p is not None else h
     if (k1 is None) == (p is None):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Specify exactly one of k1 or p.")
 
@@ -1283,8 +1256,6 @@ async def get_withdraw_callback(
     amount: int | None = None,
     p1: str | None = None,
     p2: str | None = None,
-    h: str | None = None,
-    h2: str | None = None,
 ) -> WithdrawSuccessResponse:
     """The lnurlcash redeem callback - see 25.md's "Redeeming a bearer
     note" table for the k1/pr/amount combinations (melt/rotate/split/merge)
@@ -1293,13 +1264,6 @@ async def get_withdraw_callback(
     generates for the replacement note(s) - required whenever `pr` is
     absent, and `p2` additionally whenever `amount` is too - this mint
     never generates one on WALLET's behalf.
-
-    `h`/`h2` are `p1`/`p2`'s old names, kept purely for backwards
-    compatibility with a WALLET built against a pre-rename mint (see this
-    codebase's own history - the spec itself has since renamed these
-    fields) - equivalent to `p1`/`p2` in every way, just an older spelling.
-    If both a field and its old name are given, the new name wins; a
-    WALLET should only ever send one spelling per field, never both.
 
     Details the spec leaves to the implementation:
     - min_mint_msat (/p/cb's dust floor for a *fresh* mint) does not apply
@@ -1326,8 +1290,6 @@ async def get_withdraw_callback(
       result replayed (sig/sig2 recomputed, deterministic per RFC6979)
       instead of "already spent" (see NoteStore.find_burn/swap). Melt is
       unaffected - LUD-25 only asks this of rotate/split/merge."""
-    p1 = p1 if p1 is not None else h
-    p2 = p2 if p2 is not None else h2
     if len(k1) > settings.max_k1s:
         raise HTTPException(HTTPStatus.BAD_REQUEST, f"Too many k1s (max {settings.max_k1s}).")
 
@@ -1393,13 +1355,6 @@ async def get_withdraw_callback(
                     else None
                 )
                 return WithdrawSuccessResponse(sig=sig, sig2=sig2)
-        # a bearer note's hex `h` may still name a note stored under that
-        # `h` itself (see NoteStore.migrate_legacy_note): crediting a second
-        # note for the same secret is a collision like any other
-        for ref in (p1, p2):
-            legacy_id = spend.legacy_hash(ref) if ref is not None else None
-            if legacy_id is not None and notes.id_in_use(legacy_id):
-                raise HTTPException(HTTPStatus.BAD_REQUEST, "Output already in use.")
 
     if any(spent for _, _, spent, _ in verified):
         raise HTTPException(HTTPStatus.BAD_REQUEST, _INVALID_K1)
