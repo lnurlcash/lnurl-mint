@@ -1,8 +1,9 @@
-"""LUD-25 Part 2, Seed & derivation - the SERVICE-side non-hardened tweak
+"""LUD-25 Seed & derivation - the SERVICE-side non-hardened tweak
 (derivation.derive_pubkey), independent of any router/HTTP wiring."""
 
 from coincurve import PrivateKey, PublicKeyXOnly
 
+from lnurl_mint import derivation
 from lnurl_mint.derivation import derive_pubkey, tagged_hash
 
 
@@ -167,3 +168,17 @@ def test_matches_lud25_spec_test_vector_2_cx1_encoding():
     assert encode_cx1(branch_point + chain_code) == (
         "cx1vjy9489tj0kq29mphzstsrsc2jnpsev834v0w23kth7kgzzs7e6kh9tet7vq0tdgtjx22rkf8jfpfqapsw4la49rkj47dw2u3xyqxpspgvxpa"
     )
+
+
+def test_a_tweak_hash_at_or_above_n_is_reduced_mod_n(monkeypatch):
+    """25.md: t = tagged_hash(...) mod n. A hash >= n (~2^-128 of outputs,
+    never hit naturally) must derive the same pk_i as its reduction, the way
+    a WALLET computes it, rather than being refused."""
+    n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+    branch_point = PrivateKey().public_key.format(compressed=True)[1:]
+    chain_code = bytes(32)
+    reduced = 12345
+    monkeypatch.setattr(derivation, "tagged_hash", lambda tag, msg: (n + reduced).to_bytes(32, "big"))
+    above_n = derive_pubkey(branch_point, chain_code, 0)
+    monkeypatch.setattr(derivation, "tagged_hash", lambda tag, msg: reduced.to_bytes(32, "big"))
+    assert above_n == derive_pubkey(branch_point, chain_code, 0)

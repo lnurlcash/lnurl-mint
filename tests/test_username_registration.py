@@ -1,4 +1,4 @@
-"""LUD-25 Part 2, Seed & derivation's cx1 registration (router.py's
+"""LUD-25 Seed & derivation's cx1 registration (router.py's
 POST/DELETE /p/{username}): a WALLET claims a Lightning Address username
 against its own watch-only branch, and this mint auto-mints cp1 notes off
 it directly. Every register/unregister call needs an ownership-proof
@@ -443,7 +443,7 @@ def test_internal_transfer_to_a_stale_index_is_rejected_like_any_collision(
 
     second_k1 = mint_note(2000)
     resp = client.get(f"/w/cb?k1={second_k1}&p1={cp1}")
-    assert resp.json() == {"status": "ERROR", "reason": "Output already in use."}
+    assert resp.json() == {"status": "ERROR", "reason": "already in use"}
     # the first transfer's note is untouched, the second sender's note
     # was never burned
     assert _note_value(client, pk0.hex()) == 3000

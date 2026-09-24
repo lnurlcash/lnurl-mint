@@ -55,7 +55,7 @@ def test_p3_rotate_onto_pending_mint_is_rejected(client: TestClient, node: FakeN
 
     # the squat is rejected atomically - nothing planted, nothing burned
     resp = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_comment}")
-    assert resp.json() == {"status": "ERROR", "reason": "Output already in use."}, resp.text
+    assert resp.json() == {"status": "ERROR", "reason": "already in use"}, resp.text
     assert notes.note_amount(bearer_id(victim_comment)) is None
     attacker_id = k1_id(attacker_k1)
     assert notes.note_amount(attacker_id) == 10_000

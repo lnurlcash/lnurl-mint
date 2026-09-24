@@ -273,17 +273,17 @@ def _created_invoice_payment_hash(pr: str) -> str:
     return decoded.payment_hash
 
 
-async def _mint_settled_by_comment(comment_hash: str) -> bool:
+async def _mint_settled_by_note_id(note_id: str) -> bool:
     """Whether the LUD-25 comment-protected mint whose secret hashes to
-    `comment_hash` has settled - lazily materializes the resulting note
-    (keyed by `comment_hash` itself, see NoteStore.settle_mint) the first
+    `note_id` has settled - lazily materializes the resulting note
+    (keyed by `note_id` itself, see NoteStore.settle_mint) the first
     time settlement is observed, mirroring _mint_settled's payment-hash
     path but keyed by the WALLET-chosen secret hash instead. Used by
     _note_amount_by_id as a fallback when `note_id` doesn't name a
     payment hash directly - which is always the case once a comment was
     used, since the note's id is then unrelated to the invoice that paid
     for it."""
-    pending = notes.pending_mint_by_comment(comment_hash)
+    pending = notes.pending_mint_by_note_id(note_id)
     if pending is None:
         return False
     payment_hash, _ = pending
@@ -410,7 +410,7 @@ async def _note_amount_by_id(note_id: str) -> int | None:
     amount_msat = notes.note_amount(note_id)
     if amount_msat is not None:
         return amount_msat
-    if await _mint_settled_by_comment(note_id):
+    if await _mint_settled_by_note_id(note_id):
         return notes.note_amount(note_id)
     return None
 
@@ -651,7 +651,7 @@ def _owns_branch(action: str, domain: str, username: str, branch_hex: str, sig_h
 def upsert_registered_username(
     req: Request, username: str, cx1: str, sig: str, npub: str | None = None
 ) -> RegisterUsernameResponse:
-    """LUD-25 Part 2, Seed & derivation's cx1 registration: claims
+    """LUD-25 Seed & derivation's cx1 registration: claims
     `username` for a WALLET's watch-only branch export (`cx1<P || chain
     code>`), so paying `.well-known/lnurlp/{username}` with no comment
     auto-mints a fresh `cp1` note directly on that branch for every payment
@@ -782,7 +782,7 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     identity's payRequest entry point.
 
     Also answers for any `username` registered via POST /p/{username}
-    (LUD-25 Part 2's cx1 auto-mint - see get_pay_callback_for_username):
+    (LUD-25's cx1 auto-mint - see get_pay_callback_for_username):
     such a username's own callback is `/p/{username}` itself, a distinct
     path rather than a query parameter on the fixed identity's `/p/cb` -
     so get_pay_callback_for_username knows which registered branch to
@@ -790,7 +790,7 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     Unregistered, unrecognized names still 404.
 
     A registered username's metadata additionally carries a `text/xpub`
-    entry (LUD-25 Part 2's Internal mint transfers): this same branch's
+    entry (LUD-25's Internal transfer): this same branch's
     own `cx1`, appended with `:<i>`, the best-known next-unused index on
     it (NoteStore.next_index_hint). A payer's WALLET already holding a
     `cp1`/`ck1` note on this same mint can read that straight off this
@@ -930,7 +930,7 @@ async def _pay_callback(
     settles, that preimage is an outstanding bearer note worth `amount`
     minus the advertised mint fee, if any (see _mint_fee_msat). Shared by
     get_pay_callback (this mint's own fixed identity, `username`/`branch`
-    both None) and get_pay_callback_for_username (a Part 2 cx1-registered
+    both None) and get_pay_callback_for_username (a cx1-registered
     Lightning Address, `branch` its own derivation branch, already
     resolved and lowercased by the caller - see that function's own
     docstring for why the split exists).
@@ -987,18 +987,18 @@ async def _pay_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, problem)
         zap_request = nostr
 
-    comment_hash = spend.decode_note(comment) if comment is not None else None
-    if comment_hash is None and branch is not None:
+    note_id = spend.decode_note(comment) if comment is not None else None
+    if note_id is None and branch is not None:
         # registered username: a comment that isn't a note ref (a payer's
         # WALLET sending an ordinary human LUD-12 message, or nothing at
         # all - e.g. a zap) doesn't block minting - auto-mint on this
         # username's own branch instead (see this function's own docstring)
         branch_point, chain_code = branch[:32], branch[32:]
         assert username is not None
-        comment_hash, _ = notes.claim_next_index(
+        note_id, _ = notes.claim_next_index(
             username, lambda i: derivation.derive_pubkey(branch_point, chain_code, i).hex()
         )
-    elif comment_hash is None:
+    elif note_id is None:
         raise HTTPException(
             HTTPStatus.BAD_REQUEST,
             "Missing or malformed comment: a cp1<Q>, or a bearer note's hex-encoded "
@@ -1030,7 +1030,7 @@ async def _pay_callback(
             payment_hash,
             pr,
             net_amount_msat,
-            comment_hash,
+            note_id,
             zap_request=zap_request,
         )
     except ValueError as exc:
@@ -1062,7 +1062,7 @@ async def get_pay_callback(
 async def get_pay_callback_for_username(
     req: Request, username: str, amount: int, comment: str | None = None, nostr: str | None = None
 ) -> LnurlPayActionResponse:
-    """LUD-06 callback for a Part 2 cx1-registered Lightning Address
+    """LUD-06 callback for a cx1-registered Lightning Address
     (get_lnaddress's own callback for a registered `username`, never a
     payer's choice to redirect elsewhere - a request naming a `username`
     nobody registered 404s here exactly like an unknown one anywhere

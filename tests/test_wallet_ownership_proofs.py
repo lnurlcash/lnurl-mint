@@ -189,7 +189,7 @@ def test_bare_pubkey_cannot_redeem_a_cp1_note(client: TestClient, node: FakeNode
     spend-capable k1 - pk is public information (it travels in the open,
     e.g. handed to a recipient, or used as the mint `comment`), so
     accepting it as k1 would let anyone burn any cp1 note they've merely
-    seen, breaking the entire bearer-secret model Part 2 relies on."""
+    seen, breaking the entire bearer-secret model key-path notes rely on."""
     sk, cp1 = _mint_cp1_note(client, node, 5000)
     _, new_cp1 = _note_keypair()
     data = client.get(f"/w/cb?k1={cp1}&p1={new_cp1}").json()

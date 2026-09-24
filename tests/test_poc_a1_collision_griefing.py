@@ -45,7 +45,7 @@ def _pending_victim_mint(client: TestClient, node) -> tuple[str, str, str]:
     return sha256(preimage).hexdigest(), secret, comment
 
 
-def _assert_squat_rejected(resp, attacker_k1: str, reason: str = "Output already in use.") -> None:
+def _assert_squat_rejected(resp, attacker_k1: str, reason: str = "already in use") -> None:
     """The squat fails, atomically - the attacker's own note is NOT burned
     (the whole swap rolls back)."""
     assert resp.json() == {"status": "ERROR", "reason": reason}, resp.text
@@ -72,7 +72,7 @@ def test_rotate_squat_is_rejected_and_victim_mint_survives(client: TestClient, n
     assert notes.pending_mint(victim_ph) == VICTIM_AMOUNT
 
     resp = client.get(f"/w/cb?k1={attacker_k1}&p1={victim_comment}")
-    _assert_squat_rejected(resp, attacker_k1, "Output already in use.")
+    _assert_squat_rejected(resp, attacker_k1, "already in use")
     # no squatter note exists under the victim's future id
     assert notes.note_amount(bearer_id(victim_comment)) is None
 
@@ -105,7 +105,7 @@ def test_split_and_merge_squats_are_rejected_identically(client: TestClient, nod
         k1a, k1b = mint_note(6000), mint_note(4000)
         resp = client.get(f"/w/cb?k1={k1a}&k1={k1b}&p1={victim_comment}")
         k1 = k1a  # for the atomicity check below (both must survive)
-    assert resp.json() == {"status": "ERROR", "reason": "Output already in use."}, resp.text
+    assert resp.json() == {"status": "ERROR", "reason": "already in use"}, resp.text
     assert notes.note_amount(bearer_id(victim_comment)) is None  # no squatter planted
 
     # atomic: nothing was burned - every input note is still outstanding
@@ -131,7 +131,7 @@ def test_squat_on_an_already_settled_mints_id_is_also_rejected(client: TestClien
 
     attacker_k1 = mint_note(PLANT_AMOUNT)
     resp = client.get(f"/w/cb?k1={attacker_k1}&p1={sha256(bytes.fromhex(victim_k1)).hexdigest()}")
-    _assert_squat_rejected(resp, attacker_k1, "Output already in use.")
+    _assert_squat_rejected(resp, attacker_k1, "already in use")
     # the victim's real note is untouched
     assert notes.note_amount(victim_note_id) == VICTIM_AMOUNT
 
