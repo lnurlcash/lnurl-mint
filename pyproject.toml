@@ -22,6 +22,9 @@ dependencies = [
   "coincurve>=20.0.0",
   # NIP-57 zap receipts, one short-lived connection per relay (see nostr.py)
   "websockets>=12.0",
+  # LUD-25: every note spend (ck1/cw1) is verified by Bitcoin Core's own
+  # interpreter - canonical spend transaction v2, see lnurl_mint/spend.py
+  "lnurlcash-kernel>=0.1.0",
 ]
 
 # the spark funding-source backend (FUNDINGSOURCE_BACKEND=spark, see
@@ -30,10 +33,6 @@ dependencies = [
 # `uv sync --extra spark` / `uv pip install '.[spark]'`
 [project.optional-dependencies]
 spark = ["breez-sdk-spark>=0.23.0,<0.24"]
-# LUD-25 `ct1` taproot note locks (lnurl_mint/ct1.py): script-path redemption
-# is verified by Bitcoin Core's own interpreter. Without it the mint refuses
-# ct1 outputs (it could never open them) - everything else is unaffected.
-ct1 = ["lnurlcash-kernel>=0.0.5"]
 
 [dependency-groups]
 dev = [

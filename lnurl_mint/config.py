@@ -259,6 +259,15 @@ class Settings(BaseSettings):
                 return self.onion_url.rstrip("/")
         return self.base_url.rstrip("/")
 
+    def spend_domains(self) -> list[str]:
+        """Every host this mint answers on (base_url's, then onion_url's) -
+        the domains a LUD-25 spend's signature may be bound to. A note's
+        spend signs whichever host its own URL carries, so each is valid."""
+        hosts = [urlparse(self.base_url).hostname]
+        if self.onion_url:
+            hosts.append(urlparse(self.onion_url).hostname)
+        return list(dict.fromkeys(host.lower() for host in hosts if host))
+
     def public_base_url_and_host(self, request_base_url: str) -> tuple[str, str]:
         """(public_base_url(...), its hostname) - for the routes that need
         both. The hostname is guaranteed present: base_url/onion_url are

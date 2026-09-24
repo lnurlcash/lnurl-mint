@@ -2,7 +2,7 @@ from bech32 import CHARSET, bech32_decode, bech32_hrp_expand, bech32_polymod, co
 from bolt11.exceptions import Bolt11AmountInvalidException
 from bolt11.utils import amount_to_msat, msat_to_amount
 
-# LUD-25 Part 2 Encoding: cp1/ck1/cs1/cx1 are BIP-350 bech32m (not classic
+# LUD-25 Encoding: cp1/ck1/cw1/cs1/cx1 are BIP-350 bech32m (not classic
 # bech32 - that's LUD-01's `lnurl_encode` in frontend.py, a different
 # checksum constant), each under its own 2-char HRP. The `bech32` dependency
 # (already used there) only exposes classic bech32 checksums directly, but
@@ -76,62 +76,33 @@ def _fixed_length_codec(hrp: str, length: int) -> tuple:
     return enc, dec
 
 
-# cp1<pk>: a 32-byte x-only secp256k1 public key (BIP-340) - a note's public
-# commitment, in place of Part 1's hash-of-preimage.
+# cp1<Q>: a note's 32-byte x-only taproot output key. Decoding a `cp1`,
+# `ck1` or `cw1` a request carries is lnurlcashkernel's job (see spend.py);
+# this encoder is for this mint's own output (tests, the frontend).
 encode_cp1, decode_cp1 = _fixed_length_codec("cp", 32)
-
-# ct1<Q>: same payload shape as cp1 - a 32-byte x-only key - but Q is a BIP-341
-# taproot OUTPUT key, and the HRP is the capability flag "a cw1 script-path
-# spend is also accepted for this note" (see ct1.py).
-encode_ct1, decode_ct1 = _fixed_length_codec("ct", 32)
-
-
-# ck1<pk><sig>: a 32-byte BIP-340 x-only public key concatenated with a
-# 64-byte Schnorr signature (96 bytes total) - the bearer secret for a cp1
-# note, submitted in place of a revealed k1. `pk` travels alongside the
-# signature explicitly, per 25.md's Encoding (post "actually use schnorr
-# sigs..." - a verifier reads it straight off the value rather than
-# recovering it (see signing.verify_ck1_signature).
-def encode_ck1(pubkey: bytes, signature: bytes) -> str:
-    if len(pubkey) != 32:
-        raise ValueError(f"ck1... pubkey must be 32 bytes, got {len(pubkey)}")
-    if len(signature) != 64:
-        raise ValueError(f"ck1... signature must be 64 bytes, got {len(signature)}")
-    return encode("ck", pubkey + signature)
-
-
-def decode_ck1(s: str) -> tuple[bytes, bytes] | None:
-    """Inverse of encode_ck1: (pk, sig), or None on any malformed input -
-    bad HRP/checksum, or a payload that isn't exactly 96 bytes (32 + 64) -
-    never raises, same contract as decode() above. A 65-byte payload
-    decodes fine as bech32m but fails this length check, falling through
-    to decode_ck1_legacy below."""
-    data = decode("ck", s)
-    return (data[:32], data[32:]) if data is not None and len(data) == 96 else None
 
 
 # TODO(deprecated): the pre-schnorr ck1 shape - a bare 65-byte recoverable
 # ECDSA signature (r || s || recovery-id), no embedded pk, the signer's
 # pubkey recovered via ecrecover instead (see signing.recover_note_pubkey).
 # Kept only so notes minted before the schnorr switch (../luds commit
-# da07aa0) remain redeemable during the transition; remove this, along with
-# signing.recover_note_pubkey and signing._CK1_FIXED_DIGEST, once those have
-# aged out.
+# da07aa0) remain redeemable during the transition (see spend.py); remove
+# this, along with signing.recover_note_pubkey and signing._CK1_FIXED_DIGEST,
+# once those have aged out.
 def decode_ck1_legacy(s: str) -> bytes | None:
     data = decode("ck", s)
     return data if data is not None and len(data) == 65 else None
 
 
-# cs1<sig>: the same 65-byte shape, produced by SERVICE instead - an
-# issuance certificate, never a spend authorization on its own. Unlike the
-# other three, its HRP is not the fixed 2-char "cs": it carries the
+# cs1<sig>: a 65-byte recoverable signature, produced by SERVICE - an
+# issuance certificate, never a spend authorization on its own. Unlike
+# cp1/cx1, its HRP is not a fixed 2-char one: it carries the
 # certificate's own amount_msat the same way a BOLT-11 invoice's HRP folds
 # in its amount (e.g. "cs10n" for 1000 msat) - decoded/encoded via BOLT-11's
 # own amount<>multiplier rules (bolt11.utils), unchanged here per 25.md's
 # Encoding - so a verifier reads the amount straight off the certificate,
 # nothing needs to travel alongside it. That variable-width HRP is why cs1
-# can't reuse _fixed_length_codec (built for a fixed 2-char one) like its
-# siblings do.
+# can't reuse _fixed_length_codec (built for a fixed 2-char one).
 def encode_cs1(amount_msat: int, signature: bytes) -> str:
     if len(signature) != 65:
         raise ValueError(f"cs1... payload must be 65 bytes, got {len(signature)}")

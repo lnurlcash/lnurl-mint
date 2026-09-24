@@ -44,7 +44,7 @@ from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from lnurl_mint.node import PaymentResult
 from lnurl_mint.server import app
-from tests.conftest import fake_invoice, fresh_secret
+from tests.conftest import bearer_id, fake_invoice, fresh_secret
 
 VALUE = 100_000
 
@@ -117,7 +117,7 @@ def _mint_and_materialize(client: TestClient, node: InFlightNode) -> tuple[str, 
     node.settled.add(sha256(preimage).hexdigest())
     k1 = secret
     assert client.get(f"/w?k1={k1}").json().get("tag") == "withdrawRequest"
-    note_id = comment
+    note_id = bearer_id(comment)
     assert notes.note_amount(note_id) == VALUE
     return k1, note_id
 
@@ -166,7 +166,7 @@ def test_reconcile_skips_a_note_whose_melt_is_in_flight(inflight: InFlightNode):
     # exactly one payout, the note is burned, and no value ever moved to h
     assert inflight.paid_out == [melt_pr]
     assert notes.note_spent(note_id) is True
-    assert notes.note_amount(attacker_h) is None
+    assert notes.note_amount(bearer_id(attacker_h)) is None
     assert attacker_secret  # unused - the rotate never succeeded
 
 

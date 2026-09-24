@@ -103,7 +103,7 @@ from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import fresh_secret
+from tests.conftest import bearer_id, fresh_secret, k1_id
 
 VALUE = 50_000
 
@@ -128,7 +128,7 @@ def test_t2_routing_node_race_p_alone_is_sufficient(client: TestClient, mint_not
     _, attacker_h = fresh_secret()
     r = client.get(f"/w/cb?k1={k1}&p1={attacker_h}").json()
     assert r["status"] == "OK"  # ATTACK SUCCEEDS in the no-comment fallback
-    assert notes.note_amount(attacker_h) == VALUE
+    assert notes.note_amount(bearer_id(attacker_h)) == VALUE
 
     # the legitimate payer arrives a moment later with the same P - too late
     _, victim_h = fresh_secret()
@@ -154,13 +154,13 @@ def test_t2b_comment_protected_note_defeats_the_routing_node_race(client: TestCl
     _, attacker_h = fresh_secret()
     r = client.get(f"/w/cb?k1={p}&p1={attacker_h}").json()
     assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}
-    assert notes.note_amount(attacker_h) is None
+    assert notes.note_amount(bearer_id(attacker_h)) is None
 
     # the legitimate payer's own held secret redeems the note, no race at all
     _, victim_h = fresh_secret()
     r = client.get(f"/w/cb?k1={victim_secret}&p1={victim_h}").json()
     assert r["status"] == "OK", r
-    assert notes.note_amount(victim_h) == VALUE
+    assert notes.note_amount(bearer_id(victim_h)) == VALUE
 
 
 def test_t3_informational_poll_leaks_the_live_note(client: TestClient, mint_note):
@@ -180,13 +180,13 @@ def test_t3_informational_poll_leaks_the_live_note(client: TestClient, mint_note
     r = client.get(f"/w?k1={k1}").json()
     assert r["tag"] == "withdrawRequest"
     assert r["maxWithdrawable"] == VALUE
-    assert notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest()) == VALUE  # still outstanding
+    assert notes.note_amount(k1_id(k1)) == VALUE  # still outstanding
 
     # ATTACKER, reading the logged URL afterward: replay the k1
     _, attacker_h = fresh_secret()
     r = client.get(f"/w/cb?k1={k1}&p1={attacker_h}").json()
     assert r["status"] == "OK"  # ATTACK SUCCEEDS today
-    assert notes.note_amount(attacker_h) == VALUE
+    assert notes.note_amount(bearer_id(attacker_h)) == VALUE
 
 
 def test_t4_callback_log_replay_fails_control(client: TestClient, mint_note):
@@ -199,13 +199,13 @@ def test_t4_callback_log_replay_fails_control(client: TestClient, mint_note):
     new_k1, h = fresh_secret()
     r = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     assert r["status"] == "OK"
-    assert notes.note_amount(sha256(bytes.fromhex(new_k1)).hexdigest()) == VALUE
+    assert notes.note_amount(k1_id(new_k1)) == VALUE
 
     # ATTACKER, reading the logged callback URL after the fact: replay it
     _, attacker_h = fresh_secret()
     r = client.get(f"/w/cb?k1={k1}&p1={attacker_h}").json()
     assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}
-    assert notes.note_amount(h) == VALUE  # the rotated note is untouched
+    assert notes.note_amount(bearer_id(h)) == VALUE  # the rotated note is untouched
 
 
 def test_t5_note_at_rest_is_cash_control(client: TestClient, mint_note):
@@ -221,7 +221,7 @@ def test_t5_note_at_rest_is_cash_control(client: TestClient, mint_note):
     _, finder_h = fresh_secret()
     r = client.get(f"/w/cb?k1={k1}&p1={finder_h}").json()
     assert r["status"] == "OK"
-    assert notes.note_amount(finder_h) == VALUE
+    assert notes.note_amount(bearer_id(finder_h)) == VALUE
 
 
 def test_t6_operator_can_link_rotate_to_later_spend(client: TestClient, mint_note):
@@ -239,7 +239,7 @@ def test_t6_operator_can_link_rotate_to_later_spend(client: TestClient, mint_not
 
     # the mint's storage key for the new note is verbatim the h it was
     # given - the correlation is exact, not inferred
-    assert notes.note_amount(h) == VALUE
+    assert notes.note_amount(bearer_id(h)) == VALUE
     assert sha256(bytes.fromhex(new_k1)).hexdigest() == h
 
     # ...so a later spend of new_k1 matches the recorded h one-to-one

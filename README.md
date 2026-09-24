@@ -5,10 +5,14 @@ Lightning bearer assets on top of plain [LUD-03](../luds/03.md)
 `withdrawRequest` and [LUD-06](../luds/06.md) `payRequest`. A stripped-down
 sibling of [lnurl_server](../lnurl_server); nothing but the mint.
 
-A bearer note is a `k1` this mint has credited with value. It is minted by paying a
-LUD-06 invoice (the payment preimage *is* the note), circulates offline as
-`lnurlw://<host>/w?k1=<k1>`, and can be rotated, split, merged, or melted back
-to a BOLT-11 payment. Redeem one with [lnurl-wallet](https://github.com/dni/lnurl-wallet),
+A note is a taproot output key `Q` this mint has credited with value; its
+bearer secret is a spend of `Q` - a `ck1` (key path), a `cw1` (script path),
+or for a plain bearer note just its 64-hex preimage. It is minted by paying a
+LUD-06 invoice with the note's `cp1<Q>` (or bearer hash) as comment,
+circulates offline as `lnurlw://<host>/w?k1=<spend>`, and can be rotated,
+split, merged, or melted back to a BOLT-11 payment. Every spend is verified
+by Bitcoin Core's own script interpreter, via
+[lnurlcash-kernel](../lnurlcashkernel). Redeem one with [lnurl-wallet](https://github.com/dni/lnurl-wallet),
 a reference wallet implementation (hosted at
 [wallet.lnurlcash.com](https://wallet.lnurlcash.com)).
 
@@ -18,13 +22,13 @@ a reference wallet implementation (hosted at
 |-----------------|-------------------------------------------------------------------------------|
 | `GET /`         | one-pager frontend: mint QR code (LNURL of the LUD-16 address), lightning address, mint limits, node info incl. capacity and mempool.space/amboss.space links |
 | `GET /.well-known/lnurlp/{username}` | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement) - the mint is payable at `{USERNAME}@{BASE_URL host}` (or the reserved bare-domain `_@{BASE_URL host}`, see below), and this is its only payRequest entry point (no separate bare `/p`) |
-| `GET /p/cb`   | LUD-06 callback for this mint's own fixed identity - invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
+| `GET /p/cb`   | LUD-06 callback for this mint's own fixed identity - invoice that credits the note named by `comment` (`cp1<Q>`, or a bearer hash) once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
 | `GET /p/{username}` | the same LUD-06 callback, for a registered `{username}` instead (see `POST /p/{username}` below) - no `?username=` query parameter, the path itself says which branch to auto-mint into. Takes a NIP-57 zap request as `nostr=`, see "Zaps" below |
 | `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb`/`/p/{username}` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
 | `GET /.well-known/lnurlw/{username}` | **Theoretical/experimental**: withdraw-side mirror of the LUD-16 address - informational only, see below |
-| `POST /p/{username}` | [LUD-25](../luds/25.md) Part 2: claims `{username}` for a WALLET's own `cx1` branch, so paying its lightning address auto-mints, or overwrites an existing claim's branch/npub wholesale - see "Wallet-side ownership proofs" below |
+| `POST /p/{username}` | [LUD-25](../luds/25.md): claims `{username}` for a WALLET's own `cx1` branch, so paying its lightning address auto-mints, or overwrites an existing claim's branch/npub wholesale - see "Wallet-side ownership proofs" below |
 | `DELETE /p/{username}` | frees an existing `{username}` claim entirely, back to first-come-first-served - see "Wallet-side ownership proofs" below |
 | `GET /.well-known/nostr.json` | [NIP-05](https://github.com/nostr-protocol/nips/blob/master/05.md), `?name=`: a registered username that also supplied an `npub` resolves as a Nostr identifier too - see "NIP-05" below |
 
@@ -59,12 +63,11 @@ query param if present, notes may encode a wallet-declared value in their URL
 
 **`p1`/`p2`** ([LUD-25](../luds/25.md)): whenever `pr` is absent (rotate, split,
 or merge), the caller (`WALLET`) - never this mint - generates the replacement
-note's secret, a fresh random preimage, and discloses only its sha256 hash as
-`p1` (and, for a split's change note, `p2`) - or, for a Part 2 `cp1` note (see
-"Wallet-side ownership proofs" below), the new note's public key directly,
-same field. This mint registers the new note under that value directly and
-never sees, generates, or persists the underlying preimage - the callback
-response for these carries no secret at all, just `{"status": "OK"}` (plus
+note and discloses only its `cp1<Q>` as `p1` (and, for a split's change note,
+`p2`) - or, for a plain bearer note, the sha256 hash of its preimage, the
+short form (see "Notes and spends" below). This mint registers the new note
+under that Q directly and never sees, generates, or persists its spend - the
+callback response for these carries no secret at all, just `{"status": "OK"}` (plus
 `sig`/`sig2` if offline verification is configured, see below). `p1` is
 required whenever `pr` is absent; `p2` is additionally required whenever
 `amount` is too. A missing or malformed one fails with `{"status": "ERROR",
@@ -90,10 +93,9 @@ reported back through this callback - only observable as the note becoming
 spendable again.
 
 No spendable secret is ever persisted or, for a rotate/split/merge, even seen
-by this mint at all: notes are stored keyed by `sha256(k1)` - `p1`/`p2` above,
-supplied by `WALLET` directly - and for a freshly minted note that id is
-exactly the payment hash of the invoice that funded it, so the preimage is
-discarded at invoice-creation time. The spec also asks `SERVICE` not to log query strings on the withdraw
+by this mint at all: notes are stored keyed by their output key `hex(Q)` -
+`p1`/`p2` above, or the mint `comment`, supplied by `WALLET` directly - and a
+mint invoice's own preimage is discarded at invoice-creation time. The spec also asks `SERVICE` not to log query strings on the withdraw
 endpoints, since a bearer note's `k1` can sit in one far longer than an ephemeral
 LUD-03 `k1` would, this mint disables uvicorn's per-request access log entirely
 (see `server.py`'s lifespan) rather than leave secrets in server logs by default;
@@ -124,10 +126,12 @@ have. Off by default.
 
 **Offline verification** (optional): if a funding source is configured, `GET
 /w` advertises a `mintPubkey` - that node's own identity, the same key
-it signs BOLT-11 invoices with - and rotate/split/merge responses carry a
-recoverable `sig`/`sig2` over each new note's hash (`p1`/`p2`, supplied by
-`WALLET` - this mint signs exactly what it was given, never a secret it
-derived itself), letting a holder verify a note's issuer and amount without
+it signs BOLT-11 invoices with - and rotate/split/merge responses (and the
+informational `GET /w`) carry a `cs1` certificate as `sig`/`sig2`: a
+recoverable signature over each note's `Q` and amount, the amount carried in
+the certificate's own human-readable part (`p1`/`p2`, supplied by `WALLET` -
+this mint signs exactly what it was given, never a secret it derived
+itself), letting a holder verify a note's issuer and amount without
 contacting the mint (see `signing.py`). Notes are signed via the funding source's own signmessage RPC
 (lnd's `/v1/signmessage`, cln's `signmessage`), which both wrap the message
 with the standard "Lightning Signed Message:" prefix and double-sha256 it
@@ -148,64 +152,57 @@ source, both fields are simply omitted, same as any other unconfigured
 optional field, and signing failures (e.g. a briefly unreachable node) are
 swallowed rather than failing the rotate/split/merge itself.
 
-**Wallet-side ownership proofs** ([LUD-25](../luds/25.md) Part 2, optional):
-a note may be keyed by a public key instead of a hash, spent by a
-recoverable signature instead of a revealed preimage - purely additive on
-top of everything above, a `SERVICE`/`WALLET` implementing only Part 1
-interoperates fully with one that also implements this. Four bech32m
-(BIP-350) encodings (plus the optional `ct1`/`cw1` pair), each fitting the exact same fields Part 1 already
-uses:
+**Notes and spends** ([LUD-25](../luds/25.md)): every note is a BIP-341
+taproot output key `Q`, and every `k1` is a spend of one, handed to Bitcoin
+Core's own interpreter ([lnurlcash-kernel](../lnurlcashkernel), see
+`spend.py`) as input 0 of LUD-25's canonical spend transaction. The wire
+values are bech32m (BIP-350):
 
-- **`cp1<pk>`** - a note's 32-byte x-only public key, in place of a hash-
-  of-preimage. Goes wherever Part 1 put a hash: `comment` on `/p/cb`
-  (minting) and `p1`/`p2` on `/w/cb` (rotate/split/merge output).
-- **`ck1<sig>`** - a recoverable signature with the note's own key, over
-  one fixed message - the actual bearer secret for a `cp1` note, submitted
-  as `k1` to redeem *or* to check a note informationally (there's only
-  ever the one `ck1` per note). This mint recovers the signer's public key
-  (`ecrecover`) and looks that up the same way it looks up a plain hex
-  `k1` - a bare `cp1` public key is deliberately never enough to redeem
-  anything on its own, only a `ck1` signature is. A merge may freely mix
-  legacy hex `k1`s and `ck1`s in one request.
-- **`cs1<sig>`** - this mint's own issuance certificate for a `cp1` note
-  (same offline-verification signing key as above, over the note's public
-  key and amount instead of a hash). Its own human-readable part carries
-  that amount directly, BOLT-11-style (e.g. `cs10n` for 1000 msat), so a
-  verifier reads it straight off the certificate - nothing needs to travel
-  alongside it. Returned as `sig`/`sig2` alongside every mint/rotate/split/
-  merge of a `cp1` note, and on the informational `GET /w?k1=<ck1>` or
-  `GET /w?p=<cp1<pk>>` too, so a holder (or a third party checking a note
-  by its public key alone, without ever seeing its spend secret) can
-  verify it without contacting this mint at all.
-- **`ct1<Q>` / `cw1<...>`** (optional, `uv sync --extra ct1`) - a `cp1` whose
-  32-byte key `Q` is a BIP-341 taproot *output* key: redeemable by the same
-  `ck1` key-path signature, or by a `cw1` script-path spend (a revealed leaf
-  script, control block and witness) - e.g. a CSV/CLTV timelock leaf. `ct1`
-  goes wherever `cp1` does; `cw1` goes wherever `ck1` does. Only notes
-  registered as `ct1` accept a `cw1`. The revealed leaf is checked against
-  the stored `Q` (unused leaves stay private) and executed by Bitcoin Core's
-  own script interpreter (`lnurlcashkernel`, unmodified). Time is this mint's
-  own assertion, never a proof: the `cw1` carries the redeemer's *signed*
-  `nLockTime`/`nSequence`, and the mint accepts them only if its own clock
-  agrees (Unix-time CLTV and BIP-68 time-type CSV only, the latter measured
-  from when this mint recorded the note; block heights/counts are refused).
-  Without the extra installed, `ct1` outputs are refused outright rather than
-  accepted and stranded.
+- **`cp1<Q>`** - a note, its 32-byte x-only output key. Goes on `comment`
+  (`/p/cb`, minting), `p1`/`p2` (`/w/cb`) and `p` (`/w`). Never enough to
+  redeem anything on its own.
+- **`ck1<Q><sig>`** - a key-path spend: a BIP-340 signature by `Q` over the
+  canonical spend transaction's sighash for this mint's domain, `Q`
+  travelling alongside it. Goes on `k1`.
+- **`cw1<...>`** - a script-path spend: a leaf script, its control block,
+  its witness, and the redeemer's signed `nLockTime`/`nSequence`. Goes on
+  `k1`. Any leaf Core accepts is accepted - no list of shapes - except
+  tapscript's upgrade hooks (an unknown leaf version, or any `OP_SUCCESSx`),
+  which consensus would accept unconditionally and are refused instead.
+- **`cs1<sig>`** - this mint's issuance certificate, see Offline verification.
 
-  A `cw1` that names a real, still-locked note but fails Core's own check
-  (script not yet satisfiable - a timelock not yet reached, an unsupported
-  leaf shape, a bad witness, ...) is refused with that *specific* reason,
-  not the generic "Invalid or already spent k1." every other unresolved
-  `k1` gets. This is deliberately more revealing than that generic case:
-  unlike a legacy hash preimage or a `ck1` signature, a `cw1` already
-  discloses its entire secret in the request itself, so explaining exactly
-  why it failed can't help anyone guess at a *different*, still-hidden
-  one. A `cw1` that doesn't match any locked note at all stays in the
-  ordinary ambiguous bucket (never existed vs. already spent - genuinely
-  indistinguishable, same as any other unresolved `k1`).
-- **`cx1<P || chain_code>`** - a WALLET's watch-only export of its whole
-  derivation branch for this mint (non-hardened, so every note's public
-  key is computable from `cx1` alone, never its private key) - see below.
+**Short forms**: a plain bearer note (BIP-341's NUMS key, one
+`OP_SHA256 <h> OP_EQUAL` leaf) is fully determined by `h`, so 64 hex
+characters in `k1` are its preimage (this mint builds the `cw1` itself), and
+64 hex characters where a `cp1` goes are `h`. A wallet that knows nothing of
+taproot mints and redeems with sha256 alone, exactly as a plain LUD-03 `k1`
+always worked.
+
+**Domains**: a signature is bound to the host its note's URL carries, via
+the canonical transaction's prevout. This mint accepts every host it answers
+on - `BASE_URL`'s, and `ONION_URL`'s if set - and nothing else, so a spend
+seen by another mint can't be replayed here.
+
+**Time**: the kernel never reads a clock. A timelock "verified" here means
+this mint asserted its own: a `cw1`'s signed `nLockTime` must be a Unix time
+not in the future, and a relative lock (BIP-68 time type only) counts from
+when this mint credited the note. That is custodial policy, never a proof.
+
+A `cw1` that opens a real note but fails a script or time check is refused
+with that *specific* reason - a `cw1` discloses its whole secret already, so
+explaining its failure can't help anyone guess another. Everything else that
+fails to resolve (a bad `ck1` signature, a note that never existed, or one
+already burned) stays in the same ambiguous "Invalid or already spent k1."
+
+**Deprecated, still accepted** until such notes have aged out: a `ck1` of
+the same `Q ‖ sig` shape signed over the old fixed message
+(`sha256("LNURLcash")`, or before that the raw string), and the pre-schnorr
+bare 65-byte recoverable `ck1` (see `signing.verify_legacy_ck1`,
+`bech32m.decode_ck1_legacy`). A note issued before notes were keyed by `Q`
+sits under its old id `sha256(k1)`: nothing on file tells that apart from a
+key, so it is moved to its `Q` lazily, by the first request that proves the
+link - its preimage as `k1`, or its hash as `p` (see
+`NoteStore.migrate_legacy_note`).
 
 **cx1 registration & lightning-address auto-mint** (`POST /p/{username}`): a
 WALLET claims `{username}` against its own `?cx1=`. A fresh, unclaimed name is
@@ -249,7 +246,7 @@ index-0 secret key ("the first secret", the same key `claim_next_index`
 would hand a note out under first), over `LNURLcash:register:<username>`,
 wrapped the same "Lightning Signed Message" way every other signature here is
 (see Offline verification above) - deliberately a *different* message than a
-note's own `ck1` (which signs plain `LNURLcash`), and binding both the action
+note's own spend (which signs a transaction sighash), and binding both the action
 and the username into it so a signature captured from one overwrite/delete
 can never be replayed against a different username sharing that branch, or
 against the other action for that same one. It proves continued control of

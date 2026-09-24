@@ -30,11 +30,11 @@ from fastapi.testclient import TestClient
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from lnurl_mint.router import _mint_fee_msat
-from tests.conftest import FakeNode, fake_invoice, fresh_secret
+from tests.conftest import FakeNode, bearer_id, fake_invoice, fresh_secret, k1_id
 
 
 def _note_id(k1: str) -> str:
-    return sha256(bytes.fromhex(k1)).hexdigest()
+    return k1_id(k1)
 
 
 class Ledger:
@@ -71,8 +71,8 @@ class Ledger:
         r = self.client.get(f"/w/cb?k1={k1}&p1={h}")
         assert r.json()["status"] == "OK", r.text
         self.ids.remove(_note_id(k1))
-        self.ids.append(h)
-        assert notes.note_amount(h) == old  # rotate is value-neutral
+        self.ids.append(bearer_id(h))
+        assert notes.note_amount(bearer_id(h)) == old  # rotate is value-neutral
         self.assert_conserved()
         return secret
 
@@ -86,9 +86,9 @@ class Ledger:
         change = total - amount_msat - settings.base_fee_msat
         self.fees += settings.base_fee_msat
         self.ids.remove(_note_id(k1))
-        self.ids.extend([h, h2])
-        assert notes.note_amount(h) == amount_msat
-        assert notes.note_amount(h2) == change
+        self.ids.extend([bearer_id(h), bearer_id(h2)])
+        assert notes.note_amount(bearer_id(h)) == amount_msat
+        assert notes.note_amount(bearer_id(h2)) == change
         self.assert_conserved()
         return secret_amount, secret_change
 
@@ -106,8 +106,8 @@ class Ledger:
         self.refunds += refund
         for k1 in k1s:
             self.ids.remove(_note_id(k1))
-        self.ids.append(h)
-        assert notes.note_amount(h) == sum(values) + refund
+        self.ids.append(bearer_id(h))
+        assert notes.note_amount(bearer_id(h)) == sum(values) + refund
         self.assert_conserved()
         return secret
 
@@ -222,7 +222,7 @@ def test_dust_split_edges(ledger: Ledger, fee_settings):
     r = ledger.client.get(f"/w/cb?k1={k1}&p1={h}&p2={h2}&amount={total - 1000}")
     assert r.json()["status"] == "ERROR"
     assert notes.note_amount(_note_id(k1)) == total
-    assert notes.note_amount(h) is None and notes.note_amount(h2) is None
+    assert notes.note_amount(bearer_id(h)) is None and notes.note_amount(bearer_id(h2)) is None
     ledger.assert_conserved()
 
 
@@ -326,7 +326,7 @@ def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     r = ledger.client.get(f"/w/cb?k1={k1}&k1={k1}&p1={h}")
     assert r.json()["status"] == "ERROR"
     assert notes.note_amount(_note_id(k1)) == 99_000  # intact
-    assert notes.note_amount(h) is None  # nothing minted
+    assert notes.note_amount(bearer_id(h)) is None  # nothing minted
     ledger.assert_conserved()
 
     # split with h == h2: second INSERT violates the PRIMARY KEY, whole
@@ -337,7 +337,7 @@ def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     r = ledger.client.get(f"/w/cb?k1={k1b}&p1={h_dup}&p2={h_dup}&amount=1000")
     assert r.json()["status"] == "ERROR"
     assert notes.note_amount(_note_id(k1b)) == 99_000
-    assert notes.note_amount(h_dup) is None
+    assert notes.note_amount(bearer_id(h_dup)) is None
     ledger.assert_conserved()
 
     # merge onto an EXISTING outstanding note id: INSERT collides, rolls back

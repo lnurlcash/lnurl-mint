@@ -23,14 +23,13 @@ the same event loop (production's own concurrency shape).
 """
 
 import asyncio
-from hashlib import sha256
 
 import httpx
 from fastapi.testclient import TestClient
 
 from lnurl_mint.db import notes
 from lnurl_mint.server import app
-from tests.conftest import fake_invoice, fresh_secret
+from tests.conftest import fake_invoice, fresh_secret, k1_id
 
 VALUE = 10_000
 
@@ -77,7 +76,7 @@ def test_w_shows_the_note_again_after_a_failed_melt_restores_it(client: TestClie
     note, and /w must advertise it as withdrawable again - the fix must not
     turn into a one-way 'tainted' flag."""
     k1 = mint_note(VALUE)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    note_id = k1_id(k1)
 
     node.fail_reason = "no route"
     melt = client.get(f"/w/cb?k1={k1}&pr={fake_invoice(VALUE)}")

@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
 from lnurl_mint.db import NoteStore, notes
-from tests.conftest import fake_invoice, fresh_secret, melt_in_background
+from tests.conftest import fake_invoice, fresh_secret, k1_id, melt_in_background
 
 
 def test_verify_url_absent_by_default(client: TestClient):
@@ -202,7 +202,7 @@ def test_melt_verify_reports_settled_immediately_once_finalized_even_if_the_node
     payment_hash = bolt11.decode(pr).payment_hash
     data = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
     assert data["status"] == "OK"
-    assert notes.note_spent(sha256(bytes.fromhex(k1)).hexdigest()) is True
+    assert notes.note_spent(k1_id(k1)) is True
 
     assert node.payment_actually_completed is False  # the node's own live view lags
     result = client.get(f"/verify/{payment_hash}").json()

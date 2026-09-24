@@ -44,7 +44,7 @@ import lnurl_mint.router as router_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from lnurl_mint.server import app
-from tests.conftest import fake_invoice
+from tests.conftest import fake_invoice, k1_id
 
 AMOUNT = 21_000
 W_RACERS = 8
@@ -108,7 +108,7 @@ def test_a2_http_race_materializes_exactly_one_note(client: TestClient, node, mo
     monkeypatch.setattr(settings, "verify_enabled", True)
     secret = urandom(32).hex()
     ph, k1 = _fresh_settled_pending_mint(client, node, comment_secret=secret)
-    note_id = sha256(bytes.fromhex(secret)).hexdigest()
+    note_id = k1_id(secret)
 
     # widen the race window: every is_invoice_settled call parks here long
     # enough for all racers to pass the not-yet-settled checks together
@@ -158,7 +158,7 @@ def test_a2_repeated_races_never_double_credit(client: TestClient, node, rounds:
     should survive repetition, not just one lucky interleaving."""
     for _ in range(rounds):
         ph, k1 = _fresh_settled_pending_mint(client, node)
-        note_id = sha256(bytes.fromhex(k1)).hexdigest()
+        note_id = k1_id(k1)
         bodies = _race_http(ph, k1, W_RACERS, 0)
         for body in bodies:
             assert body.get("tag") == "withdrawRequest", body

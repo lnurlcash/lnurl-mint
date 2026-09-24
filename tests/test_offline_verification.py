@@ -5,7 +5,16 @@ from fastapi.testclient import TestClient
 from lnurl_mint import bech32m
 from lnurl_mint.config import settings
 from lnurl_mint.signing import lightning_signed_message_digest, verify_note
-from tests.conftest import fresh_secret
+from tests.conftest import bearer_id, fresh_secret
+
+
+def _certifies(pubkey: str, h: str, amount_msat: int, cs1: str) -> bool:
+    """Whether `cs1` is `pubkey`'s certificate that the bearer note named by
+    its hex `h` (stored at, and certified over, its Q) is worth
+    `amount_msat` - checked against the claimed amount, not the one the
+    certificate's own HRP carries, so a wrong claim fails."""
+    decoded = bech32m.decode_cs1(cs1)
+    return decoded is not None and verify_note(pubkey, bearer_id(h), amount_msat, decoded[1].hex())
 
 
 def test_cs1_matches_lud25_spec_test_vector_4():
@@ -82,7 +91,7 @@ def test_rotate_returns_a_valid_signature(client: TestClient, mint_note, node):
     k1 = mint_note(5000)
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
-    assert verify_note(node.pubkey, h, 5000, data["sig"])
+    assert _certifies(node.pubkey, h, 5000, data["sig"])
     assert "sig2" not in data
 
 
@@ -91,15 +100,15 @@ def test_split_returns_valid_signatures_for_both_notes(client: TestClient, mint_
     _, h = fresh_secret()
     _, h2 = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}").json()
-    assert verify_note(node.pubkey, h, 2000, data["sig"])
-    assert verify_note(node.pubkey, h2, 3000, data["sig2"])
+    assert _certifies(node.pubkey, h, 2000, data["sig"])
+    assert _certifies(node.pubkey, h2, 3000, data["sig2"])
 
 
 def test_merge_returns_a_valid_signature(client: TestClient, mint_note, node):
     a, b = mint_note(2000), mint_note(3000)
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={a}&k1={b}&p1={h}").json()
-    assert verify_note(node.pubkey, h, 5000, data["sig"])
+    assert _certifies(node.pubkey, h, 5000, data["sig"])
 
 
 def test_melt_carries_no_signature(client: TestClient, node, mint_note):
@@ -115,7 +124,7 @@ def test_signature_does_not_verify_against_wrong_amount(client: TestClient, mint
     k1 = mint_note(5000)
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
-    assert not verify_note(node.pubkey, h, 5001, data["sig"])
+    assert not _certifies(node.pubkey, h, 5001, data["sig"])
 
 
 def test_signature_does_not_verify_against_wrong_k1(client: TestClient, mint_note, node):
@@ -123,7 +132,7 @@ def test_signature_does_not_verify_against_wrong_k1(client: TestClient, mint_not
     _, h = fresh_secret()
     _, other_h = fresh_secret()  # a different note's hash, never disclosed here
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
-    assert not verify_note(node.pubkey, other_h, 5000, data["sig"])
+    assert not _certifies(node.pubkey, other_h, 5000, data["sig"])
 
 
 def test_signature_does_not_verify_against_wrong_pubkey(client: TestClient, mint_note, node):
@@ -133,7 +142,7 @@ def test_signature_does_not_verify_against_wrong_pubkey(client: TestClient, mint
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     wrong_pubkey = PrivateKey().public_key.format(compressed=True).hex()
-    assert not verify_note(wrong_pubkey, h, 5000, data["sig"])
+    assert not _certifies(wrong_pubkey, h, 5000, data["sig"])
 
 
 def test_signing_failure_is_swallowed_not_raised(client: TestClient, mint_note, node, monkeypatch):

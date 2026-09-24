@@ -27,13 +27,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lnurl_mint.db import PendingNoteError, notes
-from tests.conftest import fake_invoice, fresh_secret
+from tests.conftest import fake_invoice, fresh_secret, k1_id
 
 GARBAGE_ID = "ff" * 32  # well-formed note id that was never minted
 
 
 def _note_id(k1: str) -> str:
-    return sha256(bytes.fromhex(k1)).hexdigest()
+    return k1_id(k1)
 
 
 def _materialize(client: TestClient, k1: str) -> str:
