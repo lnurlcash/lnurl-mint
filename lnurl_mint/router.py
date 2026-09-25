@@ -623,9 +623,15 @@ def _registrable_username(username: str) -> bool:
 
 def _owns_branch(action: str, domain: str, username: str, branch_hex: str, sig_hex: str) -> bool:
     """Whether `sig_hex` is a valid ownership-proof Schnorr signature (see
-    signing.verify_register_signature) by `branch_hex`'s own index-0
-    public key - "the first secret" a WALLET derives on a branch, the
-    same one claim_next_index would hand a note out under first.
+    signing.verify_register_signature) by `branch_hex`'s own
+    PURPOSE_WALLET index-0 public key - "the first secret" a WALLET
+    derives on a branch, an ordinary note key doubling as this branch's
+    stable identity (not a fourth, identity-specific purpose). This is a
+    DIFFERENT key from the one claim_next_index hands a note out under
+    first (PURPOSE_LIGHTNING_ADDRESS index 0, a separate counter on the
+    same branch) - the two purposes exist precisely so a WALLET's own
+    identity key and this mint's own auto-minted notes never share an
+    index.
     `action` ("register" or "unregister"), `domain` (this mint's own
     resolved host - see call sites), and `username` are folded into the
     signed message itself, per 25.md - domain separation from a note's own
@@ -643,7 +649,7 @@ def _owns_branch(action: str, domain: str, username: str, branch_hex: str, sig_h
     sites, never optional."""
     branch = bytes.fromhex(branch_hex)
     branch_point, chain_code = branch[:32], branch[32:]
-    expected = derivation.derive_pubkey(branch_point, chain_code, 0)
+    expected = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_WALLET, 0)
     return verify_register_signature(expected, sig_hex, action, domain, username)
 
 
@@ -996,7 +1002,8 @@ async def _pay_callback(
         branch_point, chain_code = branch[:32], branch[32:]
         assert username is not None
         note_id, _ = notes.claim_next_index(
-            username, lambda i: derivation.derive_pubkey(branch_point, chain_code, i).hex()
+            username,
+            lambda i: derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, i).hex(),
         )
     elif note_id is None:
         raise HTTPException(

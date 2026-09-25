@@ -58,27 +58,34 @@ def _ownership_sig(
     assuming the even-y (lift_x) representation of `branch_point`, so the
     private-key side must first negate `p`'s scalar whenever `p`'s own
     full pubkey has odd y (PublicKeyXOnly always represents the even-y
-    point), then add the same tweak - this recovers sk_0, the branch's
-    own index-0 secret. Signed over "LNURLcash:<action>:<domain>:<username>"
-    (25.md's Seed & derivation; a different message than a note's own ck1 -
-    see signing.py), a plain BIP-340 Schnorr signature (post "actually use
-    schnorr sigs..." - ../luds commit da07aa0), no pk attached since
-    SERVICE derives sk0's public half itself from cx1. `action` is
-    "register" (a fresh claim OR an overwrite - upsert_registered_username
-    checks it against a different branch depending on which) or
-    "unregister" (matching delete_registered_username) - the two are never
-    interchangeable. `domain` (_DOMAIN here, matching the TestClient's own
-    host - see router._owns_branch) stops a proof from replaying against a
-    different mint. `username` must already be lowercase: the endpoint
-    lowercases it before ever checking a signature, so a sig signed over a
-    mixed-case username would simply never match. Signs sha256(message), a
-    32-byte digest, not the raw message itself - see signing._schnorr_digest
-    for why."""
+    point), then add the same tweak - this recovers sk_0, the branch's own
+    PURPOSE_WALLET index-0 secret (the same key claim_next_index would
+    NEVER hand a note out under - that's PURPOSE_LIGHTNING_ADDRESS, a
+    separate counter on this same branch). Signed over
+    "LNURLcash:<action>:<domain>:<username>" (25.md's Seed & derivation; a
+    different message than a note's own ck1 - see signing.py), a plain
+    BIP-340 Schnorr signature (post "actually use schnorr sigs..." -
+    ../luds commit da07aa0), no pk attached since SERVICE derives sk0's
+    public half itself from cx1. `action` is "register" (a fresh claim OR
+    an overwrite - upsert_registered_username checks it against a
+    different branch depending on which) or "unregister" (matching
+    delete_registered_username) - the two are never interchangeable.
+    `domain` (_DOMAIN here, matching the TestClient's own host - see
+    router._owns_branch) stops a proof from replaying against a different
+    mint. `username` must already be lowercase: the endpoint lowercases it
+    before ever checking a signature, so a sig signed over a mixed-case
+    username would simply never match. Signs sha256(message), a 32-byte
+    digest, not the raw message itself - see signing._schnorr_digest for
+    why."""
     d = p.to_int()
     if p.public_key.format(compressed=True)[0] == 0x03:
         d = _N - d
     tweak = int.from_bytes(
-        derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
+        derivation.tagged_hash(
+            b"LNURLcash/derive",
+            branch_point + chain_code + derivation.PURPOSE_WALLET.to_bytes(4, "big") + (0).to_bytes(4, "big"),
+        ),
+        "big",
     )
     sk0 = PrivateKey.from_int((d + tweak) % _N)
     digest = sha256(f"LNURLcash:{action}:{domain}:{username}".encode()).digest()
@@ -149,15 +156,15 @@ def test_register_and_unregister_proofs_match_lud25_spec_test_vector_2():
     domain into the registration proof), since a bare cx1 is otherwise
     domain-agnostic and a proof over it alone replays against any SERVICE
     that will accept it, not just the one it was meant for."""
-    pk_0 = bytes.fromhex("23bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130")
+    pk_0 = bytes.fromhex("01fee34e378bf66de6afa1bfa6e30f5c89551fd92bc1b089dca93c52b7ab61bc")
     domain = "cash.example.com"
     register_sig = (
-        "9d96780fe55f602a9e238a4b2640a9f8ca939cacbbcde109cfd6ba94a6f9d46ff4aaf56ba1e4e72696f7c0e8833445bd1"
-        "94bd06155a133cf524eb587d52e8d22"
+        "9169a81db3372d8bb8a080f271f8036192131d4ed02596c0baa181613fdc5d6e17b3230b01f510a759fdb6c46b53671e5"
+        "7678f57ac0a6a3deb6300761225adc7"
     )
     unregister_sig = (
-        "7250ab2403333eb5ed73f7a212ac4f35b58f426fe5c2acb8b2194a112881332bfbeebeba0bc4615bcf361bc125d5a4149"
-        "ddbe4b6ea3b755b711fefd8bba58728"
+        "fcc6a96f560d6505bfc475d8c2d4383047f2ece6593412af9b2834913af60f108b6e194cef31c377a23a051f8c80c1660e"
+        "fc2313b7876a2f80bc1f0f423c7835"
     )
     assert verify_register_signature(pk_0, register_sig, "register", domain, "alice")
     assert verify_register_signature(pk_0, unregister_sig, "unregister", domain, "alice")
@@ -409,7 +416,7 @@ def test_internal_transfer_skips_lightning_via_rotate(client: TestClient, node: 
     decoded_branch = bech32m.decode_cx1(advertised_cx1)
     assert decoded_branch == branch_point + chain_code
 
-    pk_i = derivation.derive_pubkey(branch_point, chain_code, int(index_hint))
+    pk_i = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, int(index_hint))
     cp1 = bech32m.encode_cp1(pk_i)
 
     # the sender already holds an ordinary (legacy) note on this mint -
@@ -435,7 +442,7 @@ def test_internal_transfer_to_a_stale_index_is_rejected_like_any_collision(
     p, branch_point, chain_code, cx1 = _branch()
     sig = _ownership_sig(p, branch_point, chain_code, "register", "jack")
     client.post(f"/p/jack?cx1={cx1}&sig={sig}")
-    pk0 = derivation.derive_pubkey(branch_point, chain_code, 0)
+    pk0 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0)
     cp1 = bech32m.encode_cp1(pk0)
 
     first_k1 = mint_note(3000)
@@ -460,7 +467,7 @@ def test_paying_registered_address_with_no_comment_automints(client: TestClient,
     assert pay_response.json().get("pr"), pay_response.text
     node.settled.add(_payment_hash(node))
 
-    expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
+    expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
     assert _note_value(client, expected_id) == 5000
 
 
@@ -475,7 +482,7 @@ def test_hex_lookup_of_an_automint_key_leaves_the_note_alone(client: TestClient,
     client.get(f"{lnaddress['callback']}?amount=5000")
     node.settled.add(_payment_hash(node))
 
-    expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
+    expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
     assert client.get(f"/w?p={expected_id}").json()["reason"] == "Unknown note."
     assert _note_value(client, expected_id) == 5000
 
@@ -491,8 +498,8 @@ def test_second_automint_payment_uses_the_next_index(client: TestClient, node: F
         assert pay_response.json().get("pr")
         node.settled.add(_payment_hash(node))
 
-    pk0 = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
-    pk1 = derivation.derive_pubkey(branch_point, chain_code, 1).hex()
+    pk0 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
+    pk1 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 1).hex()
     assert _note_value(client, pk0) == 5000
     assert _note_value(client, pk1) == 5000
 
@@ -506,7 +513,7 @@ def test_automint_skips_an_index_already_taken_by_a_manual_mint(client: TestClie
     sig = _ownership_sig(p, branch_point, chain_code, "register", "grace")
     client.post(f"/p/grace?cx1={cx1}&sig={sig}")
 
-    pk0 = derivation.derive_pubkey(branch_point, chain_code, 0)
+    pk0 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0)
     manual = client.get(f"/p/cb?amount=1000&comment={bech32m.encode_cp1(pk0)}")
     assert manual.json().get("pr")
     node.settled.add(_payment_hash(node))
@@ -517,7 +524,7 @@ def test_automint_skips_an_index_already_taken_by_a_manual_mint(client: TestClie
     assert pay_response.json().get("pr")
     node.settled.add(_payment_hash(node))
 
-    pk1 = derivation.derive_pubkey(branch_point, chain_code, 1)
+    pk1 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 1)
     assert _note_value(client, pk1.hex()) == 5000
 
 
@@ -549,7 +556,7 @@ def test_ordinary_lud12_comment_automints_for_registered_username(client: TestCl
     assert pay_response.json().get("pr"), pay_response.text
     node.settled.add(_payment_hash(node))
 
-    expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
+    expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
     assert _note_value(client, expected_id) == 5000
 
 
@@ -564,7 +571,7 @@ def test_empty_lud12_comment_automints_for_registered_username(client: TestClien
     assert pay_response.json().get("pr"), pay_response.text
     node.settled.add(_payment_hash(node))
 
-    expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
+    expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
     assert _note_value(client, expected_id) == 5000
 
 
@@ -648,7 +655,8 @@ def test_automint_works_with_mixed_case_username_in_callback(client: TestClient,
     assert pay_response.json().get("pr"), pay_response.text
     node.settled.add(_payment_hash(node))
 
-    expected_cp1 = bech32m.encode_cp1(derivation.derive_pubkey(branch_point, chain_code, 0))
+    expected_pk = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0)
+    expected_cp1 = bech32m.encode_cp1(expected_pk)
     data = client.get(f"/w?p={expected_cp1}").json()
     assert data.get("maxWithdrawable") == 5000, data
 
