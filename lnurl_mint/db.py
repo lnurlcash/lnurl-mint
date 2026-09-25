@@ -657,12 +657,17 @@ class NoteStore:
         """Picks and reserves the next usable note index on `username`'s
         registered branch - LUD-25's own race-avoidance paragraph under
         Lightning Address auto-mint: `derive(i)` (router.py, wrapping
-        derivation.derive_pubkey) is tried starting at the persisted
-        next_index, skipping any index whose resulting pubkey already
-        names an outstanding *or* previously-minted note - the same
-        collision create_mint itself would reject - rather than crediting
-        into an index a pending rotate/split/merge might also be about to
-        install. Persists next_index past the winner and returns
+        derivation.derive_pubkey at PURPOSE_LIGHTNING_ADDRESS) is tried
+        starting at the persisted next_index, skipping any index whose
+        resulting pubkey already names an outstanding *or* previously-minted
+        note - the same collision create_mint itself would reject - rather
+        than crediting into an index a pending rotate/split/merge (or
+        another internal transfer targeting this same branch) might also be
+        about to install. Since PURPOSE_LIGHTNING_ADDRESS is its own counter,
+        separate from a WALLET's own PURPOSE_WALLET/PURPOSE_CHANGE notes on
+        this same branch, this can never collide with one of those - only
+        with another use of this same purpose. Persists next_index past the
+        winner and returns
         (pk_hex, index) for the caller to mint under, exactly like a
         WALLET-supplied cp1. Raises ValueError if `username` was
         never registered."""

@@ -41,7 +41,11 @@ def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action
     if p.public_key.format(compressed=True)[0] == 0x03:
         d = _N - d
     tweak = int.from_bytes(
-        derivation.tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big")), "big"
+        derivation.tagged_hash(
+            b"LNURLcash/derive",
+            branch_point + chain_code + derivation.PURPOSE_WALLET.to_bytes(4, "big") + (0).to_bytes(4, "big"),
+        ),
+        "big",
     )
     sk0 = PrivateKey.from_int((d + tweak) % _N)
     digest = sha256(f"LNURLcash:{action}:{_DOMAIN}:{username}".encode()).digest()

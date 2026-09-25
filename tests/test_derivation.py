@@ -4,7 +4,13 @@
 from coincurve import PrivateKey, PublicKeyXOnly
 
 from lnurl_mint import derivation
-from lnurl_mint.derivation import derive_pubkey, tagged_hash
+from lnurl_mint.derivation import (
+    PURPOSE_CHANGE,
+    PURPOSE_LIGHTNING_ADDRESS,
+    PURPOSE_WALLET,
+    derive_pubkey,
+    tagged_hash,
+)
 
 
 def _branch() -> tuple[bytes, bytes]:
@@ -15,24 +21,41 @@ def _branch() -> tuple[bytes, bytes]:
 
 def test_derive_pubkey_is_deterministic():
     branch_point, chain_code = _branch()
-    assert derive_pubkey(branch_point, chain_code, 0) == derive_pubkey(branch_point, chain_code, 0)
+    assert derive_pubkey(branch_point, chain_code, PURPOSE_WALLET, 0) == derive_pubkey(
+        branch_point, chain_code, PURPOSE_WALLET, 0
+    )
 
 
 def test_different_indices_give_different_keys():
     branch_point, chain_code = _branch()
-    keys = {derive_pubkey(branch_point, chain_code, i) for i in range(10)}
+    keys = {derive_pubkey(branch_point, chain_code, PURPOSE_WALLET, i) for i in range(10)}
     assert len(keys) == 10
+
+
+def test_different_purposes_give_different_keys_at_the_same_index():
+    """The whole point of `purpose`: a WALLET's own notes (PURPOSE_WALLET),
+    a split's change (PURPOSE_CHANGE) and whatever lands on a registered
+    Lightning Address (PURPOSE_LIGHTNING_ADDRESS) must never collide, even
+    at the same index on the same branch."""
+    branch_point, chain_code = _branch()
+    keys = {
+        derive_pubkey(branch_point, chain_code, purpose, 0)
+        for purpose in (PURPOSE_WALLET, PURPOSE_CHANGE, PURPOSE_LIGHTNING_ADDRESS)
+    }
+    assert len(keys) == 3
 
 
 def test_different_branches_give_different_keys_at_the_same_index():
     branch_point_a, chain_code_a = _branch()
     branch_point_b, chain_code_b = _branch()
-    assert derive_pubkey(branch_point_a, chain_code_a, 0) != derive_pubkey(branch_point_b, chain_code_b, 0)
+    assert derive_pubkey(branch_point_a, chain_code_a, PURPOSE_WALLET, 0) != derive_pubkey(
+        branch_point_b, chain_code_b, PURPOSE_WALLET, 0
+    )
 
 
 def test_output_is_a_valid_32_byte_xonly_point():
     branch_point, chain_code = _branch()
-    pk = derive_pubkey(branch_point, chain_code, 0)
+    pk = derive_pubkey(branch_point, chain_code, PURPOSE_WALLET, 0)
     assert len(pk) == 32
     # round-trips through PublicKeyXOnly without raising - a genuinely
     # invalid x-coordinate would fail to construct/format here
@@ -42,26 +65,29 @@ def test_output_is_a_valid_32_byte_xonly_point():
 def test_matches_manual_bip340_tweak():
     """Cross-checks derive_pubkey's use of PublicKeyXOnly.tweak_add against
     an independently computed tagged hash, confirming the message layout
-    (P || chain_code || index) and the tweak-add step actually match
-    25.md's algorithm rather than some other combination."""
+    (P || chain_code || purpose || index) and the tweak-add step actually
+    match 25.md's algorithm rather than some other combination."""
     branch_point, chain_code = _branch()
+    purpose = PURPOSE_CHANGE
     index = 7
-    expected_tweak = tagged_hash(b"LNURLcash/derive", branch_point + chain_code + index.to_bytes(4, "big"))
+    expected_tweak = tagged_hash(
+        b"LNURLcash/derive", branch_point + chain_code + purpose.to_bytes(4, "big") + index.to_bytes(4, "big")
+    )
     manual = PublicKeyXOnly(branch_point)
     manual.tweak_add(expected_tweak)
-    assert derive_pubkey(branch_point, chain_code, index) == manual.format()
+    assert derive_pubkey(branch_point, chain_code, purpose, index) == manual.format()
 
 
 def test_rejects_wrong_length_inputs():
     branch_point, chain_code = _branch()
     try:
-        derive_pubkey(branch_point[:-1], chain_code, 0)
+        derive_pubkey(branch_point[:-1], chain_code, PURPOSE_WALLET, 0)
         raised = False
     except ValueError:
         raised = True
     assert raised
     try:
-        derive_pubkey(branch_point, chain_code + b"\x00", 0)
+        derive_pubkey(branch_point, chain_code + b"\x00", PURPOSE_WALLET, 0)
         raised = False
     except ValueError:
         raised = True
@@ -108,25 +134,32 @@ def test_matches_lud25_spec_test_vector_1():
     BIP-32's own published "Test vector 1" seed, SERVICE domain
     mint.example. Index 5 is included (not just 0-2) because the vector
     itself does, to show i is a plain ser32(i) encode, not restricted to a
-    contiguous run."""
+    contiguous run. Purpose 0 (wallet) carries the same 0/1/2/5 run; purpose
+    1 (change) and purpose 2 (Lightning Address) each add one index-0 entry
+    to show purpose alone changes every derived value, even at the same
+    index (25.md's own Test Vectors intro)."""
     branch_point = bytes.fromhex("b783d2930dc053a971f019054ca43e7c9de50e0769de872dd1ddde5d0bf4c9d1")
     chain_code = bytes.fromhex("ab91cc11aea395ea6b62292a6147f51ef4150ebea04e745137b68719e238f904")
     expected_pk = {
-        0: "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
-        1: "f0c1ea9aede945b9cf84f3bf8df27ac65154a937e4d10cb8a5865df0583b1083",
-        2: "c1e51bc2b8ad1c6ecfe382fe201c322506e2783a2e4d3eae0da47fece2eab078",
-        5: "c2b6a6d230d3ca51cc680bf84948c416eab70109542a0cf4fd1fbebbd647891a",
+        (PURPOSE_WALLET, 0): "690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f",
+        (PURPOSE_WALLET, 1): "3e76b56c1a90bc64c4bf594be91a3cb8861a150232da92705cff6ee3714bb384",
+        (PURPOSE_WALLET, 2): "20146298f9b6439027ead2b4a15738a10721b26c425b58c634baac6147ee7fc7",
+        (PURPOSE_WALLET, 5): "c64ed8f1cd0f4d23aba8ddd739d9ae7e1a7ba2719cb54437384498fbc73788b3",
+        (PURPOSE_CHANGE, 0): "e9a2d71a45a4a5a22d3378bdd761f0b3b2622b6a939d24c779668379352d8274",
+        (PURPOSE_LIGHTNING_ADDRESS, 0): "acff3482453b4671e410d2158fd93ab7d4c3e8c1b9554ce1190deb021fd2cd4c",
     }
-    for index, pk_hex in expected_pk.items():
-        assert derive_pubkey(branch_point, chain_code, index).hex() == pk_hex
+    for (purpose, index), pk_hex in expected_pk.items():
+        assert derive_pubkey(branch_point, chain_code, purpose, index).hex() == pk_hex
 
     # t_0 explicitly, not just the final pk_0 - 25.md publishes it as
     # tagged_hash(...) mod n, but the raw tagged_hash output already
     # happens to be < n for this index (as for every index in both
     # vectors - see 25.md's own note on this), so it's numerically
     # identical to the mod-n-reduced value the spec shows
-    t_0 = tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big"))
-    assert t_0.hex() == "10054a4025dc5678a26e16087703ac1af6be92dab9cc20f10c5a5ae0ffbd057c"
+    t_0 = tagged_hash(
+        b"LNURLcash/derive", branch_point + chain_code + PURPOSE_WALLET.to_bytes(4, "big") + (0).to_bytes(4, "big")
+    )
+    assert t_0.hex() == "b1d16430daa362837db746ce38dc6c5ebb092876692b5cac5bbdce0f3cd92688"
 
 
 def test_matches_lud25_spec_test_vector_1_cx1_encoding():
@@ -145,19 +178,22 @@ def test_matches_lud25_spec_test_vector_1_cx1_encoding():
 def test_matches_lud25_spec_test_vector_2():
     """25.md "Test vector 2: Seed & derivation (branch root has even-y P)" -
     BIP-32's own published "Test vector 2" seed, SERVICE domain
-    cash.example.com."""
+    cash.example.com. All entries are purpose 0 (wallet) - vector 1 above is
+    where the other two purposes are exercised."""
     branch_point = bytes.fromhex("64885a9cab93ec051761b8a0b80e1854a61865878d58f72a365dfd640850f675")
     chain_code = bytes.fromhex("6b95795f9807ada85c8ca50ec93c921483a183abfed4a3b4abe6b95c89880306")
     expected_pk = {
-        0: "23bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130",
-        1: "b1ab49e8ca397385ccb6d17d611bf8afc75390513bdcdfe3d760e0bb9860e0aa",
-        2: "9cf00b60589f863cedd2773b42341e6f5102d6bd23d04559a3103d50611b2ada",
+        0: "01fee34e378bf66de6afa1bfa6e30f5c89551fd92bc1b089dca93c52b7ab61bc",
+        1: "7c5434c33d25bc24d98c35b2610dd484cb2a3d4a7854de354f7747e9b10597b8",
+        2: "2517f8221468e33cb7aafdffde313950446da0cf4d790c9b758b373dc67a5686",
     }
     for index, pk_hex in expected_pk.items():
-        assert derive_pubkey(branch_point, chain_code, index).hex() == pk_hex
+        assert derive_pubkey(branch_point, chain_code, PURPOSE_WALLET, index).hex() == pk_hex
 
-    t_0 = tagged_hash(b"LNURLcash/derive", branch_point + chain_code + (0).to_bytes(4, "big"))
-    assert t_0.hex() == "4d010c0ae5b4e0def5d0eb651d5e08de7fc36aef5703231480372b24688d2711"
+    t_0 = tagged_hash(
+        b"LNURLcash/derive", branch_point + chain_code + PURPOSE_WALLET.to_bytes(4, "big") + (0).to_bytes(4, "big")
+    )
+    assert t_0.hex() == "3867f7253bf0d9b02bb522625e3ae902b2d46896c199a62ea64b97d4dc2ad230"
 
 
 def test_matches_lud25_spec_test_vector_2_cx1_encoding():
@@ -179,6 +215,6 @@ def test_a_tweak_hash_at_or_above_n_is_reduced_mod_n(monkeypatch):
     chain_code = bytes(32)
     reduced = 12345
     monkeypatch.setattr(derivation, "tagged_hash", lambda tag, msg: (n + reduced).to_bytes(32, "big"))
-    above_n = derive_pubkey(branch_point, chain_code, 0)
+    above_n = derive_pubkey(branch_point, chain_code, PURPOSE_WALLET, 0)
     monkeypatch.setattr(derivation, "tagged_hash", lambda tag, msg: reduced.to_bytes(32, "big"))
-    assert above_n == derive_pubkey(branch_point, chain_code, 0)
+    assert above_n == derive_pubkey(branch_point, chain_code, PURPOSE_WALLET, 0)

@@ -27,12 +27,23 @@ _N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 # genuinely interoperability-critical - see this repo's plan notes.
 _INDEX_BYTES = 4
 
+# `purpose` splits a branch into three independent counters (25.md's Seed &
+# derivation), so a WALLET's own indices and this mint's auto-minted ones
+# can never collide by coincidence, and each kind of note restores on its
+# own. PURPOSE_WALLET also doubles as the key a registration proof signs
+# with (router._owns_branch) - an ordinary index-0 note key, not a fourth
+# purpose of its own.
+PURPOSE_WALLET = 0
+PURPOSE_CHANGE = 1
+PURPOSE_LIGHTNING_ADDRESS = 2
 
-def derive_pubkey(branch_point: bytes, chain_code: bytes, index: int) -> bytes:
-    """pk_i for note index `index` on the branch (branch_point, chain_code)
-    = a cx1's decoded (P, chain_code) - per 25.md:
 
-        t     = tagged_hash("LNURLcash/derive", P || chaincode || i) mod n
+def derive_pubkey(branch_point: bytes, chain_code: bytes, purpose: int, index: int) -> bytes:
+    """pk_i for note index `index` on purpose `purpose` of the branch
+    (branch_point, chain_code) = a cx1's decoded (P, chain_code) - per
+    25.md:
+
+        t     = tagged_hash("LNURLcash/derive", P || chaincode || purpose || i) mod n
         Q     = lift_x(P) + t·G
         pk_i  = x(Q)
 
@@ -45,7 +56,10 @@ def derive_pubkey(branch_point: bytes, chain_code: bytes, index: int) -> bytes:
     Q is the point at infinity (~2^-256)."""
     if len(branch_point) != 32 or len(chain_code) != 32:
         raise ValueError("branch_point and chain_code must each be 32 bytes")
-    digest = tagged_hash(b"LNURLcash/derive", branch_point + chain_code + index.to_bytes(_INDEX_BYTES, "big"))
+    digest = tagged_hash(
+        b"LNURLcash/derive",
+        branch_point + chain_code + purpose.to_bytes(_INDEX_BYTES, "big") + index.to_bytes(_INDEX_BYTES, "big"),
+    )
     tweak = (int.from_bytes(digest, "big") % _N).to_bytes(32, "big")
     pubkey = PublicKeyXOnly(branch_point)
     pubkey.tweak_add(tweak)
