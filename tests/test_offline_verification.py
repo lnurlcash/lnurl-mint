@@ -78,7 +78,7 @@ def test_signature_absent_without_a_funding_source(client: TestClient, mint_note
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     assert data["status"] == "OK"
-    assert "sig" not in data
+    assert "c" not in data
 
 
 def test_mint_pubkey_is_the_funding_source_nodes_own_identity(client: TestClient, mint_note, node):
@@ -91,8 +91,8 @@ def test_rotate_returns_a_valid_signature(client: TestClient, mint_note, node):
     k1 = mint_note(5000)
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
-    assert _certifies(node.pubkey, h, 5000, data["sig"])
-    assert "sig2" not in data
+    assert _certifies(node.pubkey, h, 5000, data["c"])
+    assert "c2" not in data
 
 
 def test_split_returns_valid_signatures_for_both_notes(client: TestClient, mint_note, node):
@@ -100,15 +100,15 @@ def test_split_returns_valid_signatures_for_both_notes(client: TestClient, mint_
     _, h = fresh_secret()
     _, h2 = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}").json()
-    assert _certifies(node.pubkey, h, 2000, data["sig"])
-    assert _certifies(node.pubkey, h2, 3000, data["sig2"])
+    assert _certifies(node.pubkey, h, 2000, data["c"])
+    assert _certifies(node.pubkey, h2, 3000, data["c2"])
 
 
 def test_merge_returns_a_valid_signature(client: TestClient, mint_note, node):
     a, b = mint_note(2000), mint_note(3000)
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={a}&k1={b}&p1={h}").json()
-    assert _certifies(node.pubkey, h, 5000, data["sig"])
+    assert _certifies(node.pubkey, h, 5000, data["c"])
 
 
 def test_melt_carries_no_signature(client: TestClient, node, mint_note):
@@ -124,7 +124,7 @@ def test_signature_does_not_verify_against_wrong_amount(client: TestClient, mint
     k1 = mint_note(5000)
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
-    assert not _certifies(node.pubkey, h, 5001, data["sig"])
+    assert not _certifies(node.pubkey, h, 5001, data["c"])
 
 
 def test_signature_does_not_verify_against_wrong_k1(client: TestClient, mint_note, node):
@@ -132,7 +132,7 @@ def test_signature_does_not_verify_against_wrong_k1(client: TestClient, mint_not
     _, h = fresh_secret()
     _, other_h = fresh_secret()  # a different note's hash, never disclosed here
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
-    assert not _certifies(node.pubkey, other_h, 5000, data["sig"])
+    assert not _certifies(node.pubkey, other_h, 5000, data["c"])
 
 
 def test_signature_does_not_verify_against_wrong_pubkey(client: TestClient, mint_note, node):
@@ -142,7 +142,7 @@ def test_signature_does_not_verify_against_wrong_pubkey(client: TestClient, mint
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     wrong_pubkey = PrivateKey().public_key.format(compressed=True).hex()
-    assert not _certifies(wrong_pubkey, h, 5000, data["sig"])
+    assert not _certifies(wrong_pubkey, h, 5000, data["c"])
 
 
 def test_signing_failure_is_swallowed_not_raised(client: TestClient, mint_note, node, monkeypatch):
@@ -156,7 +156,7 @@ def test_signing_failure_is_swallowed_not_raised(client: TestClient, mint_note, 
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     assert data["status"] == "OK"
-    assert "sig" not in data
+    assert "c" not in data
 
 
 def test_signing_failure_is_still_logged(client: TestClient, mint_note, node, monkeypatch, caplog):

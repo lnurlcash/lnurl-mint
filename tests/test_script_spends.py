@@ -118,7 +118,7 @@ def _fund(client: TestClient, mint_note, locked: Locked) -> None:
     """Rotate a fresh bearer note into `locked` - as a WALLET locking value."""
     k1 = mint_note(AMOUNT)
     response = client.get(f"/w/cb?k1={k1}&p1={locked.cp1}")
-    assert response.json().get("sig"), response.text
+    assert response.json().get("c"), response.text
 
 
 def _redeem(client: TestClient, k1: str, p1: str | None = None):
@@ -139,7 +139,7 @@ def test_lock_then_redeem_by_script_path(client: TestClient, node: FakeNode, min
 
     response = _redeem(client, cw1, h)
     assert not _refused(response), response
-    assert bech32m.decode_cs1(response["sig"])[0] == AMOUNT
+    assert bech32m.decode_cs1(response["c"])[0] == AMOUNT
     assert notes.note_amount(locked.q.hex()) is None  # burned
     assert notes.note_amount(bearer_id(h)) == AMOUNT  # re-issued under p1
 
@@ -154,7 +154,7 @@ def test_informational_get_verifies_the_cw1_and_certifies(client: TestClient, no
     _fund(client, mint_note, locked)
     data = client.get(f"/w?k1={locked.cw1([owner])}").json()
     assert data["minWithdrawable"] == data["maxWithdrawable"] == AMOUNT
-    assert bech32m.decode_cs1(data["sig"])[0] == AMOUNT
+    assert bech32m.decode_cs1(data["c"])[0] == AMOUNT
     assert notes.note_amount(locked.q.hex()) == AMOUNT  # informational: not burned
 
 

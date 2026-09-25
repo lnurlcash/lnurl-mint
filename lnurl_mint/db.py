@@ -643,7 +643,7 @@ class NoteStore:
     def next_index_hint(self, username: str) -> int | None:
         """The persisted best-known next-unused index on `username`'s
         registered branch (LUD-25's Internal transfer,
-        router.get_lnaddress's `text/xpub` metadata entry) - a plain read
+        router.get_lnaddress's `text/cpub` metadata entry) - a plain read
         of the same `next_index` column claim_next_index reserves from,
         with none of its collision-skipping. Purely advisory ("`i` is
         only a hint" per spec): a WALLET starts guessing from it, but

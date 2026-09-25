@@ -372,14 +372,14 @@ def test_registered_lnaddress_metadata_advertises_xpub_for_internal_transfers(cl
     sig = _ownership_sig(p, branch_point, chain_code, "register", "gina")
     client.post(f"/p/gina?cx1={cx1}&sig={sig}")
     metadata = json.loads(client.get("/.well-known/lnurlp/gina").json()["metadata"])
-    assert ["text/xpub", f"{cx1}:0"] in metadata
+    assert ["text/cpub", f"{cx1}:0"] in metadata
 
 
 def test_fixed_identity_lnaddress_metadata_has_no_xpub(client: TestClient):
     """This mint's own fixed identity has no watch-only branch to advertise
     - only a registered (cx1-backed) username does."""
     metadata = json.loads(client.get(f"/.well-known/lnurlp/{settings.username}").json()["metadata"])
-    assert not any(entry[0] == "text/xpub" for entry in metadata)
+    assert not any(entry[0] == "text/cpub" for entry in metadata)
 
 
 def test_xpub_index_hint_advances_after_an_automint(client: TestClient, node: FakeNode):
@@ -392,13 +392,13 @@ def test_xpub_index_hint_advances_after_an_automint(client: TestClient, node: Fa
     client.post(f"/p/hana?cx1={cx1}&sig={sig}")
     lnaddress = client.get("/.well-known/lnurlp/hana").json()
     metadata = json.loads(lnaddress["metadata"])
-    assert ["text/xpub", f"{cx1}:0"] in metadata
+    assert ["text/cpub", f"{cx1}:0"] in metadata
 
     pay_response = client.get(f"{lnaddress['callback']}?amount=5000")
     assert pay_response.json().get("pr")
 
     metadata = json.loads(client.get("/.well-known/lnurlp/hana").json()["metadata"])
-    assert ["text/xpub", f"{cx1}:1"] in metadata
+    assert ["text/cpub", f"{cx1}:1"] in metadata
 
 
 def test_internal_transfer_skips_lightning_via_rotate(client: TestClient, node: FakeNode, mint_note):
@@ -410,7 +410,7 @@ def test_internal_transfer_skips_lightning_via_rotate(client: TestClient, node: 
     sig = _ownership_sig(p, branch_point, chain_code, "register", "ivan")
     client.post(f"/p/ivan?cx1={cx1}&sig={sig}")
     metadata = json.loads(client.get("/.well-known/lnurlp/ivan").json()["metadata"])
-    xpub_entry = next(entry for entry in metadata if entry[0] == "text/xpub")
+    xpub_entry = next(entry for entry in metadata if entry[0] == "text/cpub")
     advertised_cx1, index_hint = xpub_entry[1].rsplit(":", 1)
     assert advertised_cx1 == cx1
     decoded_branch = bech32m.decode_cx1(advertised_cx1)
@@ -430,7 +430,7 @@ def test_internal_transfer_skips_lightning_via_rotate(client: TestClient, node: 
     # ivan's own advertised next_index is untouched by this - it's only a
     # hint, never reserved by anything other than his own auto-mint path
     metadata = json.loads(client.get("/.well-known/lnurlp/ivan").json()["metadata"])
-    assert ["text/xpub", f"{cx1}:{index_hint}"] in metadata
+    assert ["text/cpub", f"{cx1}:{index_hint}"] in metadata
 
 
 def test_internal_transfer_to_a_stale_index_is_rejected_like_any_collision(
