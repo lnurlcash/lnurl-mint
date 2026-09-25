@@ -352,7 +352,7 @@ def test_rotate_is_unaffected_by_mint_fees(client: TestClient, mint_note, monkey
 
 def test_retried_rotate_replays_the_original_result(client: TestClient, mint_note):
     # LUD-25 "Retrying a mutation": an exact repeat of a completed rotate
-    # (same k1, same h) must get the same {"status": "OK", "sig": ...} back,
+    # (same k1, same h) must get the same {"status": "OK", "c": ...} back,
     # not "already spent" - a GET can get retried by transports that never
     # ask WALLET first
     k1 = mint_note(5000)

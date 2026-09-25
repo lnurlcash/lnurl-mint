@@ -795,7 +795,7 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     derive into straight from the URL, no extra parameter needed.
     Unregistered, unrecognized names still 404.
 
-    A registered username's metadata additionally carries a `text/xpub`
+    A registered username's metadata additionally carries a `text/cpub`
     entry (LUD-25's Internal transfer): this same branch's
     own `cx1`, appended with `:<i>`, the best-known next-unused index on
     it (NoteStore.next_index_hint). A payer's WALLET already holding a
@@ -824,7 +824,7 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
         if branch_hex is not None:
             index_hint = notes.next_index_hint(username.lower()) or 0
             cx1 = bech32m.encode_cx1(bytes.fromhex(branch_hex))
-            metadata_entries.append(["text/xpub", f"{cx1}:{index_hint}"])
+            metadata_entries.append(["text/cpub", f"{cx1}:{index_hint}"])
     if settings.base_fee_msat or settings.fee_percent_ppm:
         # a SERVICE that omits this entry is assumed fee-free per spec, so
         # it's only added when there's actually a fee to disclose
@@ -1202,7 +1202,7 @@ async def get_withdraw(
     via this endpoint's callback (rotate/split/merge, which have no
     invoice) do.
 
-    `sig` (LUD-25 Offline verification) is a ready-made `cs1` certificate
+    `c` (LUD-25 Offline verification) is a ready-made `cs1` certificate
     for the note, so a WALLET need not force a rotate just to obtain one,
     and a recovery scan probing `?p=cp1<pk_i>` gets one for free. A
     certificate isn't a spend authorization - just this mint's signature
@@ -1250,7 +1250,7 @@ async def get_withdraw(
         maxWithdrawable=amount_msat,
         defaultDescription=f"lnurlcash bearer note on {host}",
         mintPubkey=await mint_pubkey(settings.funding_source()),
-        sig=sig,
+        c=sig,
     )
 
 
@@ -1294,7 +1294,7 @@ async def get_withdraw_callback(
       that setting's own docstring in config.py.
     - LUD-25's Retrying a mutation: a rotate/split/merge whose k1(s), p1, p2
       and amount exactly match an earlier completed one gets that same
-      result replayed (sig/sig2 recomputed, deterministic per RFC6979)
+      result replayed (c/c2 recomputed, deterministic per RFC6979)
       instead of "already spent" (see NoteStore.find_burn/swap). Melt is
       unaffected - LUD-25 only asks this of rotate/split/merge."""
     if len(k1) > settings.max_k1s:
@@ -1361,7 +1361,7 @@ async def get_withdraw_callback(
                     if recorded_p2 is not None and amount2_msat is not None
                     else None
                 )
-                return WithdrawSuccessResponse(sig=sig, sig2=sig2)
+                return WithdrawSuccessResponse(c=sig, c2=sig2)
 
     if any(spent for _, _, spent, _ in verified):
         raise HTTPException(HTTPStatus.BAD_REQUEST, _INVALID_K1)
@@ -1472,8 +1472,8 @@ async def get_withdraw_callback(
             notes.swap(note_ids, [p1_id, p2_id], [amount, change_amount])
             funding_source = settings.funding_source()
             return WithdrawSuccessResponse(
-                sig=await _certificate(p1_id, amount, funding_source),
-                sig2=await _certificate(p2_id, change_amount, funding_source),
+                c=await _certificate(p1_id, amount, funding_source),
+                c2=await _certificate(p2_id, change_amount, funding_source),
             )
 
         # rotate is a merge of one note - the refund below is exactly 0
@@ -1485,7 +1485,7 @@ async def get_withdraw_callback(
         refund = (len(note_ids) - 1) * settings.base_fee_msat
         merged_amount = total_msat + refund
         notes.swap(note_ids, [p1_id], [merged_amount])
-        return WithdrawSuccessResponse(sig=await _certificate(p1_id, merged_amount, settings.funding_source()))
+        return WithdrawSuccessResponse(c=await _certificate(p1_id, merged_amount, settings.funding_source()))
     except OutputCollisionError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
     except PendingNoteError:

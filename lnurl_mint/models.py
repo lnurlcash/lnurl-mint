@@ -95,7 +95,7 @@ class LnurlWithdrawResponse(BaseModel):
     signing key - omitted entirely if no funding source is configured
     (see signing.mint_pubkey).
 
-    `sig` (Offline verification, optional) is a ready-made `cs1` certificate
+    `c` (Offline verification, optional) is a ready-made `cs1` certificate
     for the note, whether looked up by a spend (`k1`) or by `p` - see
     router.get_withdraw. Omitted if signing isn't available right now."""
 
@@ -106,7 +106,7 @@ class LnurlWithdrawResponse(BaseModel):
     maxWithdrawable: int
     defaultDescription: str = ""
     mintPubkey: str | None = None
-    sig: str | None = None
+    c: str | None = None
 
 
 class LnurlMintAddressResponse(BaseModel):
@@ -168,15 +168,15 @@ class WithdrawSuccessResponse(BaseModel):
     """LUD-03 success response, extended per LUD-25 (see
     router.get_withdraw_callback for the full melt/rotate/split/merge
     semantics). `pr`/`verify` echo a melt's invoice and its LUD-21-style
-    settlement-proof URL, present only when VERIFY_ENABLED. `sig`/`sig2`
-    are this mint's Offline-verification signatures over a rotate/split/
-    merge's `p1`/`p2` (see signing.sign_note) - `sig2` only for a split,
+    settlement-proof URL, present only when VERIFY_ENABLED. `c`/`c2`
+    are this mint's Offline-verification certificates over a rotate/split/
+    merge's `p1`/`p2` (see signing.sign_note) - `c2` only for a split,
     both omitted if no funding source is configured. None fields are
     excluded on the wire."""
 
     status: Literal["OK"] = "OK"
-    sig: str | None = None
-    sig2: str | None = None
+    c: str | None = None
+    c2: str | None = None
     pr: str | None = None
     verify: str | None = None
 
