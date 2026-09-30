@@ -68,7 +68,7 @@ note and discloses only its `cp1<Q>` as `p1` (and, for a split's change note,
 short form (see "Notes and spends" below). This mint registers the new note
 under that Q directly and never sees, generates, or persists its spend - the
 callback response for these carries no secret at all, just `{"status": "OK"}` (plus
-`sig`/`sig2` if offline verification is configured, see below). `p1` is
+`c`/`c2` if offline verification is configured, see below). `p1` is
 required whenever `pr` is absent; `p2` is additionally required whenever
 `amount` is too. A missing or malformed one fails with `{"status": "ERROR",
 "reason": "missing p1"}` (or `"missing p2"`) rather than this mint generating
@@ -122,7 +122,7 @@ have. Off by default.
 **Offline verification** (optional): if a funding source is configured, `GET
 /w` advertises a `mintPubkey` - that node's own identity, the same key
 it signs BOLT-11 invoices with - and rotate/split/merge responses (and the
-informational `GET /w`) carry a `cs1` certificate as `sig`/`sig2`: a
+informational `GET /w`) carry a `cs1` certificate as `c`/`c2`: a
 recoverable signature over each note's `Q` and amount, the amount carried in
 the certificate's own human-readable part (`p1`/`p2`, supplied by `WALLET` -
 this mint signs exactly what it was given, never a secret it derived
@@ -212,7 +212,7 @@ case-insensitively (same as `USERNAME` itself, see above) - `Alice`,
 one a payer's client happened to send.
 
 **Internal mint transfers**: a registered username's payRequest metadata
-additionally carries a `["text/xpub", "<cx1>:<i>"]` entry - that same branch's
+additionally carries a `["text/cpub", "<cx1>:<i>"]` entry - that same branch's
 own `cx1`, plus `i`, this mint's best-known next-unused index on it. A payer
 who already holds a `cp1`/`ck1` note on this same mint can read that straight
 off the recipient's Lightning Address and skip Lightning entirely: derive
