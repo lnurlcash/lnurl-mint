@@ -528,19 +528,35 @@ def test_automint_skips_an_index_already_taken_by_a_manual_mint(client: TestClie
     assert _note_value(client, pk1.hex()) == 5000
 
 
-def test_comment_is_still_honored_for_registered_username(client: TestClient, node: FakeNode):
-    """The address owner minting for themselves with a specific key already
-    in hand overrides auto-derivation."""
+def test_registered_username_does_not_advertise_comment_allowed(client: TestClient):
+    """A registered username always auto-mints on its own branch, so its
+    payRequest invites no comment - unlike the fixed identity, which
+    requires one."""
+    p, branch_point, chain_code, cx1 = _branch()
+    sig = _ownership_sig(p, branch_point, chain_code, "register", "ivy")
+    client.post(f"/p/ivy?cx1={cx1}&sig={sig}")
+
+    assert "commentAllowed" not in client.get("/.well-known/lnurlp/ivy").json()
+    assert client.get(f"/.well-known/lnurlp/{settings.username}").json()["commentAllowed"] == 64
+
+
+def test_output_comment_is_ignored_for_registered_username(client: TestClient, node: FakeNode):
+    """A payer-supplied output (cp1 or bearer hash) must never redirect a
+    payment to a registered username away from the owner's own branch."""
     p, branch_point, chain_code, cx1 = _branch()
     sig = _ownership_sig(p, branch_point, chain_code, "register", "henry")
     client.post(f"/p/henry?cx1={cx1}&sig={sig}")
-    sk = PrivateKey()
-    cp1 = bech32m.encode_cp1(sk.public_key.format(compressed=True)[1:])
+    cp1 = bech32m.encode_cp1(PrivateKey().public_key.format(compressed=True)[1:])
 
-    pay_response = client.get(f"/p/henry?amount=5000&comment={cp1}")
-    assert pay_response.json().get("pr")
-    node.settled.add(_payment_hash(node))
-    assert _note_value(client, bech32m.decode_cp1(cp1).hex()) == 5000
+    for comment in (cp1, "ab" * 32):
+        pay_response = client.get("/p/henry", params={"amount": 5000, "comment": comment})
+        assert pay_response.json().get("pr"), pay_response.text
+        node.settled.add(_payment_hash(node))
+
+    assert _note_value(client, bech32m.decode_cp1(cp1).hex()) is None
+    for i in range(2):
+        expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, i).hex()
+        assert _note_value(client, expected_id) == 5000
 
 
 def test_ordinary_lud12_comment_automints_for_registered_username(client: TestClient, node: FakeNode):

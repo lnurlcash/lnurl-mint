@@ -194,16 +194,16 @@ WALLET claims `{username}` against its own `?cx1=`. A fresh, unclaimed name is
 first-come-first-served, no proof of possession required - `cx1` alone never
 grants spending, only a note's own private key does, so a squatted
 registration only costs the real owner a friendly name, never funds. Once
-registered, paying `{username}@{BASE_URL host}` with **no `comment`**
+registered, paying `{username}@{BASE_URL host}` always
 auto-mints a fresh `cp1` note directly on that branch (this mint derives the
 next unused key itself - `NoteStore.claim_next_index`, skipping any index
 already outstanding or spent, guarding the same race the spec's Seed &
-derivation describes) - no per-payment WALLET involvement needed at all. The
-payer's WALLET can still supply its own `comment=cp1<pk>` instead (e.g. the
-address owner minting for themselves with a specific key already in hand),
-which is honored as-is; any other `comment` (an ordinary human LUD-12
-message, say) is simply ignored rather than rejected, and auto-mint proceeds
-as if none were sent. Set `USERNAME_REGISTRATION_ENABLED=false` to turn this
+derivation describes) - no per-payment WALLET involvement needed at all. Its
+payRequest doesn't advertise `commentAllowed`, and a `comment` sent anyway is
+ignored rather than rejected: honoring a payer-supplied `cp1<pk>` or bearer
+hash there would mint the payment to whoever named it instead of the address
+owner. Minting to a key of your own choosing goes through the fixed identity
+(`USERNAME`/`_`) instead, where `comment` stays mandatory. Set `USERNAME_REGISTRATION_ENABLED=false` to turn this
 off entirely (404, same off-switch convention as `VERIFY_ENABLED`) - this
 mint's own fixed identity (`USERNAME`/the bare-domain `_`) is never affected
 either way. A registered username is always stored lowercase and matched

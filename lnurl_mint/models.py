@@ -15,10 +15,11 @@ class LnurlPayResponse(BaseModel):
     router.get_pay_callback) - 64 hex chars, exactly what's advertised
     here. `comment` is mandatory on the fixed identity's callback, which
     has no other key to mint under (missing or malformed rejects the mint
-    outright), unlike LUD-12's own optional/free-text default use. On a
-    cx1-registered username it is not: that address has a branch to
-    mint on, so a comment naming no output is the free text
-    `commentAllowed` invites and is ignored rather than refused.
+    outright), unlike LUD-12's own optional/free-text default use. A
+    cx1-registered username omits it entirely: a payment there always
+    auto-mints on the owner's own branch, so there is no output for a
+    payer to name (and this mint never stores or relays a free-text
+    message) - see router._pay_callback.
 
     `allowsNostr`/`nostrPubkey` (NIP-57) are present only on a registered
     username's payRequest of a mint with NOSTR_KEY set: the callback then
@@ -30,7 +31,7 @@ class LnurlPayResponse(BaseModel):
     maxSendable: int
     metadata: str
     withdrawLink: str
-    commentAllowed: int = 64
+    commentAllowed: int | None = 64
     allowsNostr: bool | None = None
     nostrPubkey: str | None = None
 

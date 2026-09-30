@@ -846,6 +846,9 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
         maxSendable=settings.max_sendable_msat,
         metadata=metadata,
         withdrawLink=f"{base}/w",
+        # a registered username always auto-mints on its own branch and
+        # ignores any comment (see _pay_callback), so it invites none
+        commentAllowed=64 if _known_username(username) else None,
         allowsNostr=True if zappable else None,
         nostrPubkey=settings.nostr_pubkey() if zappable else None,
     )
@@ -951,14 +954,16 @@ async def _pay_callback(
     branch there is no other key to mint under, so it is rejected outright.
 
     `comment` is REQUIRED for the fixed identity (`branch` is None), same
-    as ever - but for a registered username it becomes OPTIONAL: when
-    omitted, this mint derives the next unused note key on that username's
-    own registered branch itself (NoteStore.claim_next_index) and credits
-    the note under it, exactly as if the payer's WALLET had supplied that
-    same `comment=cp1<pk>` in person (25.md's Seed & derivation) - no
-    WALLET involvement needed at receive time at all. A comment that names
-    an output is still honored; one that does not is the free text
-    `commentAllowed` asks for, and the branch key is used instead.
+    as ever - but for a registered username it is IGNORED: this mint
+    always derives the next unused note key on that username's own
+    registered branch itself (NoteStore.claim_next_index) and credits the
+    note under it (25.md's Seed & derivation) - no WALLET involvement
+    needed at receive time at all. Honoring a payer-supplied output there
+    would mint the payment to whoever named it rather than the address
+    owner (and a human message that happened to be 64 hex chars would
+    lock it behind a preimage nobody holds), so get_lnaddress doesn't
+    advertise `commentAllowed` for it, and one sent anyway is dropped
+    rather than refused.
 
     `verify` (LUD-21, only advertised if VERIFY_ENABLED) lets a wallet with
     no node of its own poll settlement status - see verify_invoice. Safe to
@@ -993,24 +998,24 @@ async def _pay_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, problem)
         zap_request = nostr
 
-    note_id = spend.decode_note(comment) if comment is not None else None
-    if note_id is None and branch is not None:
-        # registered username: a comment that isn't a note ref (a payer's
-        # WALLET sending an ordinary human LUD-12 message, or nothing at
-        # all - e.g. a zap) doesn't block minting - auto-mint on this
-        # username's own branch instead (see this function's own docstring)
+    if branch is not None:
+        # registered username: any comment is ignored - always auto-mint on
+        # this username's own branch (see this function's own docstring)
         branch_point, chain_code = branch[:32], branch[32:]
         assert username is not None
         note_id, _ = notes.claim_next_index(
             username,
             lambda i: derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, i).hex(),
         )
-    elif note_id is None:
-        raise HTTPException(
-            HTTPStatus.BAD_REQUEST,
-            "Missing or malformed comment: a cp1<Q>, or a bearer note's hex-encoded "
-            "32-byte hash, is required to mint.",
-        )
+    else:
+        decoded = spend.decode_note(comment) if comment is not None else None
+        if decoded is None:
+            raise HTTPException(
+                HTTPStatus.BAD_REQUEST,
+                "Missing or malformed comment: a cp1<Q>, or a bearer note's hex-encoded "
+                "32-byte hash, is required to mint.",
+            )
+        note_id = decoded
     funding_source = _funding_source()
     try:
         if zap_request is None:
