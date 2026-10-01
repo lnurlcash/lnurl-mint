@@ -1,4 +1,6 @@
+import asyncio
 import json
+import threading
 from hashlib import sha256
 from os import urandom
 
@@ -476,9 +478,31 @@ def test_pending_note_rejects_concurrent_operations(client: TestClient, node: Fa
     pr = fake_invoice(5000)
     node.pay_delay = 0.3
 
+    # Hold the pending window open deterministically: melt_in_background
+    # only waits until the note is marked pending; the window is then kept
+    # open solely by FakeNode's 0.3s pay_delay sleep. Under load (CI, a
+    # busy build machine) the main thread can be scheduled later than
+    # that, so the payment completes - the note already spent or restored
+    # - before the concurrent request below lands and the "pending"
+    # assertion flakes. Gate the payment on an event the main thread sets
+    # only after receiving the concurrent response; the 30s bound merely
+    # prevents a hang if the test fails before setting it.
+    payment_gate = threading.Event()
+    real_pay_invoice = node.pay_invoice
+
+    async def gated_pay_invoice(invoice, config, fee_limit_msat):
+        for _ in range(600):
+            if payment_gate.is_set():
+                break
+            await asyncio.sleep(0.05)
+        return await real_pay_invoice(invoice, config, fee_limit_msat)
+
+    monkeypatch.setattr(node, "pay_invoice", gated_pay_invoice)
+
     _, h = fresh_secret()
     thread = _melt_in_background(client, k1, pr, monkeypatch)
     concurrent = client.get(f"/w/cb?k1={k1}&p1={h}").json()
+    payment_gate.set()
     thread.join()
     result = thread.result  # type: ignore[attr-defined]
 
@@ -492,11 +516,33 @@ def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node:
     k1 = mint_note(5000)
     pr = fake_invoice(5000)
     node.pay_delay = 0.3
+
+    # Hold the pending window open deterministically: melt_in_background
+    # only waits until the note is marked pending; the window is then kept
+    # open solely by FakeNode's 0.3s pay_delay sleep. Under load (CI, a
+    # busy build machine) the main thread can be scheduled later than
+    # that, so the payment completes - the note already spent or restored
+    # - before the concurrent request below lands and the "pending"
+    # assertion flakes. Gate the payment on an event the main thread sets
+    # only after receiving the concurrent response; the 30s bound merely
+    # prevents a hang if the test fails before setting it.
+    payment_gate = threading.Event()
+    real_pay_invoice = node.pay_invoice
+
+    async def gated_pay_invoice(invoice, config, fee_limit_msat):
+        for _ in range(600):
+            if payment_gate.is_set():
+                break
+            await asyncio.sleep(0.05)
+        return await real_pay_invoice(invoice, config, fee_limit_msat)
+
+    monkeypatch.setattr(node, "pay_invoice", gated_pay_invoice)
     node.fail_payments = True
 
     _, h = fresh_secret()
     thread = _melt_in_background(client, k1, pr, monkeypatch)
     concurrent = client.get(f"/w/cb?k1={k1}&p1={h}").json()
+    payment_gate.set()
     thread.join()
     result = thread.result  # type: ignore[attr-defined]
 
@@ -769,8 +815,30 @@ def test_withdraw_by_hash_reports_pending_the_same_way_k1_would(
     pr = fake_invoice(5000)
     node.pay_delay = 0.3
 
+    # Hold the pending window open deterministically: melt_in_background
+    # only waits until the note is marked pending; the window is then kept
+    # open solely by FakeNode's 0.3s pay_delay sleep. Under load (CI, a
+    # busy build machine) the main thread can be scheduled later than
+    # that, so the payment completes - the note already spent or restored
+    # - before the concurrent request below lands and the "pending"
+    # assertion flakes. Gate the payment on an event the main thread sets
+    # only after receiving the concurrent response; the 30s bound merely
+    # prevents a hang if the test fails before setting it.
+    payment_gate = threading.Event()
+    real_pay_invoice = node.pay_invoice
+
+    async def gated_pay_invoice(invoice, config, fee_limit_msat):
+        for _ in range(600):
+            if payment_gate.is_set():
+                break
+            await asyncio.sleep(0.05)
+        return await real_pay_invoice(invoice, config, fee_limit_msat)
+
+    monkeypatch.setattr(node, "pay_invoice", gated_pay_invoice)
+
     thread = _melt_in_background(client, k1, pr, monkeypatch)
     pending = client.get(f"/w?p={k1_hash(k1)}").json()
+    payment_gate.set()
     thread.join()
 
     assert pending == {"status": "ERROR", "reason": "pending"}
@@ -782,9 +850,31 @@ def test_failed_melt_restores_hash_lookup_value(client: TestClient, node: FakeNo
     k1 = mint_note(5000)
     note_id = k1_id(k1)
     node.pay_delay = 0.3
+
+    # Hold the pending window open deterministically: melt_in_background
+    # only waits until the note is marked pending; the window is then kept
+    # open solely by FakeNode's 0.3s pay_delay sleep. Under load (CI, a
+    # busy build machine) the main thread can be scheduled later than
+    # that, so the payment completes - the note already spent or restored
+    # - before the concurrent request below lands and the "pending"
+    # assertion flakes. Gate the payment on an event the main thread sets
+    # only after receiving the concurrent response; the 30s bound merely
+    # prevents a hang if the test fails before setting it.
+    payment_gate = threading.Event()
+    real_pay_invoice = node.pay_invoice
+
+    async def gated_pay_invoice(invoice, config, fee_limit_msat):
+        for _ in range(600):
+            if payment_gate.is_set():
+                break
+            await asyncio.sleep(0.05)
+        return await real_pay_invoice(invoice, config, fee_limit_msat)
+
+    monkeypatch.setattr(node, "pay_invoice", gated_pay_invoice)
     node.fail_payments = True
     thread = _melt_in_background(client, k1, fake_invoice(5000), monkeypatch)
     pending = client.get(f"/w?p={k1_hash(k1)}").json()
+    payment_gate.set()
     thread.join()
 
     assert pending == {"status": "ERROR", "reason": "pending"}
