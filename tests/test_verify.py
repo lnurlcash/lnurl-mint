@@ -1,9 +1,12 @@
+import asyncio
 import sqlite3
+import threading
 from hashlib import sha256
 
 import bolt11
 from fastapi.testclient import TestClient
 
+import lnurl_mint.router as router_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import NoteStore, notes
 from tests.conftest import fake_invoice, fresh_secret, k1_id, melt_in_background
@@ -178,10 +181,33 @@ def test_melt_verify_reports_unsettled_while_genuinely_pending(client: TestClien
     payment_hash = bolt11.decode(pr).payment_hash
     node.pay_delay = 0.3
 
+    # Hold the pending window open deterministically: the melt helper only
+    # waits until the note is marked pending; the window is then kept open
+    # solely by FakeNode's pay_delay sleep, which a loaded machine can
+    # schedule the probe below past - the payment completes and the note is
+    # already spent or restored before the "pending" assertion. Gate the
+    # payment on an event set once the probes are done (the 30s bound
+    # merely prevents a hang if the test fails before setting it).
+    # Patched on router_module, not on node: the node fixture wires the
+    # fake in as router_module.pay_invoice (a bound method captured at
+    # fixture setup), so the instance attribute is not on the call path.
+    payment_gate = threading.Event()
+    real_pay_invoice = router_module.pay_invoice
+
+    async def gated_pay_invoice(invoice, config, fee_limit_msat):
+        for _ in range(600):
+            if payment_gate.is_set():
+                break
+            await asyncio.sleep(0.05)
+        return await real_pay_invoice(invoice, config, fee_limit_msat)
+
+    monkeypatch.setattr(router_module, "pay_invoice", gated_pay_invoice)
+
     thread = melt_in_background(client, k1, pr, monkeypatch)
     result = client.get(f"/verify/{payment_hash}").json()
     assert result == {"status": "OK", "settled": False, "pr": pr}
     assert "preimage" not in result
+    payment_gate.set()
     thread.join()
     assert thread.result["melt"]["status"] == "OK"  # type: ignore[attr-defined]
 

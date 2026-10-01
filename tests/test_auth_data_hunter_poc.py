@@ -48,13 +48,37 @@ def test_f1_verify_disclosure_requires_verify_enabled(client: TestClient, node: 
     assert notes.note_amount(bearer_id(victim_h)) == 50_000
 
 
-def test_f3_withdraw_rejects_pending_note_with_spec_reason(client: TestClient, node: FakeNode, mint_note):
+def test_f3_withdraw_rejects_pending_note_with_spec_reason(client: TestClient, node: FakeNode, mint_note, monkeypatch):
+    import asyncio
     import threading
 
+    import lnurl_mint.router as router_module
     from tests.conftest import fake_invoice
 
     k1 = mint_note(10_000)
     node.pay_delay = 2.0  # hold the melt in-flight
+
+    # Hold the pending window open deterministically: the melt helper only
+    # waits until the note is marked pending; the window is then kept open
+    # solely by FakeNode's pay_delay sleep, which a loaded machine can
+    # schedule the probe below past - the payment completes and the note is
+    # already spent or restored before the "pending" assertion. Gate the
+    # payment on an event set once the probes are done (the 30s bound
+    # merely prevents a hang if the test fails before setting it).
+    # Patched on router_module, not on node: the node fixture wires the
+    # fake in as router_module.pay_invoice (a bound method captured at
+    # fixture setup), so the instance attribute is not on the call path.
+    payment_gate = threading.Event()
+    real_pay_invoice = router_module.pay_invoice
+
+    async def gated_pay_invoice(invoice, config, fee_limit_msat):
+        for _ in range(600):
+            if payment_gate.is_set():
+                break
+            await asyncio.sleep(0.05)
+        return await real_pay_invoice(invoice, config, fee_limit_msat)
+
+    monkeypatch.setattr(router_module, "pay_invoice", gated_pay_invoice)
 
     # TestClient runs background tasks before returning, so drive the melt
     # from a thread to observe the pending window from the main one
@@ -78,6 +102,7 @@ def test_f3_withdraw_rejects_pending_note_with_spec_reason(client: TestClient, n
         rotate = client.get(f"/w/cb?k1={k1}&p1={h}").json()
         assert rotate["reason"] == "pending"
     finally:
+        payment_gate.set()
         node.pay_delay = 0.0
         t.join()
     assert melt_resp["r"].json()["status"] == "OK"

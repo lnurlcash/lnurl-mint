@@ -23,10 +23,12 @@ the same event loop (production's own concurrency shape).
 """
 
 import asyncio
+import threading
 
 import httpx
 from fastapi.testclient import TestClient
 
+import lnurl_mint.router as router_module
 from lnurl_mint.db import notes
 from lnurl_mint.server import app
 from tests.conftest import fake_invoice, fresh_secret, k1_id
@@ -34,13 +36,35 @@ from tests.conftest import fake_invoice, fresh_secret, k1_id
 VALUE = 10_000
 
 
-def test_w_reports_pending_during_melt_window(client: TestClient, node, mint_note):
+def test_w_reports_pending_during_melt_window(client: TestClient, node, mint_note, monkeypatch):
     k1 = mint_note(VALUE)
     # materialize it once so /w is a pure read of note state
     assert client.get(f"/w?k1={k1}").json()["maxWithdrawable"] == VALUE
 
     node.pay_delay = 0.5  # the background melt stays in flight long enough to probe
     probes: dict[str, dict] = {}
+
+    # Hold the pending window open deterministically: the melt helper only
+    # waits until the note is marked pending; the window is then kept open
+    # solely by FakeNode's pay_delay sleep, which a loaded machine can
+    # schedule the probe below past - the payment completes and the note is
+    # already spent or restored before the "pending" assertion. Gate the
+    # payment on an event set once the probes are done (the 30s bound
+    # merely prevents a hang if the test fails before setting it).
+    # Patched on router_module, not on node: the node fixture wires the
+    # fake in as router_module.pay_invoice (a bound method captured at
+    # fixture setup), so the instance attribute is not on the call path.
+    payment_gate = threading.Event()
+    real_pay_invoice = router_module.pay_invoice
+
+    async def gated_pay_invoice(invoice, config, fee_limit_msat):
+        for _ in range(600):
+            if payment_gate.is_set():
+                break
+            await asyncio.sleep(0.05)
+        return await real_pay_invoice(invoice, config, fee_limit_msat)
+
+    monkeypatch.setattr(router_module, "pay_invoice", gated_pay_invoice)
 
     async def gather():
         transport = httpx.ASGITransport(app=app)
@@ -50,10 +74,16 @@ def test_w_reports_pending_during_melt_window(client: TestClient, node, mint_not
                 return (await ac.get(f"/w/cb?k1={k1}&pr={fake_invoice(VALUE)}")).json()
 
             async def probe():
-                await asyncio.sleep(0.05)  # let the melt reach mark_pending + background pay
+                # wait until the melt has actually reserved the note - the
+                # fixed 0.05s sleep raced the melt's own startup under load
+                for _ in range(200):
+                    if notes.pending_melts():
+                        break
+                    await asyncio.sleep(0.05)
                 probes["w"] = (await ac.get(f"/w?k1={k1}")).json()
                 _, h = fresh_secret()
                 probes["rotate"] = (await ac.get(f"/w/cb?k1={k1}&p1={h}")).json()
+                payment_gate.set()
 
             return await asyncio.gather(melt(), probe())
 

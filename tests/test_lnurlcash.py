@@ -478,17 +478,18 @@ def test_pending_note_rejects_concurrent_operations(client: TestClient, node: Fa
     pr = fake_invoice(5000)
     node.pay_delay = 0.3
 
-    # Hold the pending window open deterministically: melt_in_background
-    # only waits until the note is marked pending; the window is then kept
-    # open solely by FakeNode's 0.3s pay_delay sleep. Under load (CI, a
-    # busy build machine) the main thread can be scheduled later than
-    # that, so the payment completes - the note already spent or restored
-    # - before the concurrent request below lands and the "pending"
-    # assertion flakes. Gate the payment on an event the main thread sets
-    # only after receiving the concurrent response; the 30s bound merely
-    # prevents a hang if the test fails before setting it.
+    # Hold the pending window open deterministically: the melt helper only
+    # waits until the note is marked pending; the window is then kept open
+    # solely by FakeNode's pay_delay sleep, which a loaded machine can
+    # schedule the probe below past - the payment completes and the note is
+    # already spent or restored before the "pending" assertion. Gate the
+    # payment on an event set once the probes are done (the 30s bound
+    # merely prevents a hang if the test fails before setting it).
+    # Patched on router_module, not on node: the node fixture wires the
+    # fake in as router_module.pay_invoice (a bound method captured at
+    # fixture setup), so the instance attribute is not on the call path.
     payment_gate = threading.Event()
-    real_pay_invoice = node.pay_invoice
+    real_pay_invoice = router_module.pay_invoice
 
     async def gated_pay_invoice(invoice, config, fee_limit_msat):
         for _ in range(600):
@@ -497,7 +498,7 @@ def test_pending_note_rejects_concurrent_operations(client: TestClient, node: Fa
             await asyncio.sleep(0.05)
         return await real_pay_invoice(invoice, config, fee_limit_msat)
 
-    monkeypatch.setattr(node, "pay_invoice", gated_pay_invoice)
+    monkeypatch.setattr(router_module, "pay_invoice", gated_pay_invoice)
 
     _, h = fresh_secret()
     thread = _melt_in_background(client, k1, pr, monkeypatch)
@@ -517,17 +518,18 @@ def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node:
     pr = fake_invoice(5000)
     node.pay_delay = 0.3
 
-    # Hold the pending window open deterministically: melt_in_background
-    # only waits until the note is marked pending; the window is then kept
-    # open solely by FakeNode's 0.3s pay_delay sleep. Under load (CI, a
-    # busy build machine) the main thread can be scheduled later than
-    # that, so the payment completes - the note already spent or restored
-    # - before the concurrent request below lands and the "pending"
-    # assertion flakes. Gate the payment on an event the main thread sets
-    # only after receiving the concurrent response; the 30s bound merely
-    # prevents a hang if the test fails before setting it.
+    # Hold the pending window open deterministically: the melt helper only
+    # waits until the note is marked pending; the window is then kept open
+    # solely by FakeNode's pay_delay sleep, which a loaded machine can
+    # schedule the probe below past - the payment completes and the note is
+    # already spent or restored before the "pending" assertion. Gate the
+    # payment on an event set once the probes are done (the 30s bound
+    # merely prevents a hang if the test fails before setting it).
+    # Patched on router_module, not on node: the node fixture wires the
+    # fake in as router_module.pay_invoice (a bound method captured at
+    # fixture setup), so the instance attribute is not on the call path.
     payment_gate = threading.Event()
-    real_pay_invoice = node.pay_invoice
+    real_pay_invoice = router_module.pay_invoice
 
     async def gated_pay_invoice(invoice, config, fee_limit_msat):
         for _ in range(600):
@@ -536,7 +538,7 @@ def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node:
             await asyncio.sleep(0.05)
         return await real_pay_invoice(invoice, config, fee_limit_msat)
 
-    monkeypatch.setattr(node, "pay_invoice", gated_pay_invoice)
+    monkeypatch.setattr(router_module, "pay_invoice", gated_pay_invoice)
     node.fail_payments = True
 
     _, h = fresh_secret()
@@ -815,17 +817,18 @@ def test_withdraw_by_hash_reports_pending_the_same_way_k1_would(
     pr = fake_invoice(5000)
     node.pay_delay = 0.3
 
-    # Hold the pending window open deterministically: melt_in_background
-    # only waits until the note is marked pending; the window is then kept
-    # open solely by FakeNode's 0.3s pay_delay sleep. Under load (CI, a
-    # busy build machine) the main thread can be scheduled later than
-    # that, so the payment completes - the note already spent or restored
-    # - before the concurrent request below lands and the "pending"
-    # assertion flakes. Gate the payment on an event the main thread sets
-    # only after receiving the concurrent response; the 30s bound merely
-    # prevents a hang if the test fails before setting it.
+    # Hold the pending window open deterministically: the melt helper only
+    # waits until the note is marked pending; the window is then kept open
+    # solely by FakeNode's pay_delay sleep, which a loaded machine can
+    # schedule the probe below past - the payment completes and the note is
+    # already spent or restored before the "pending" assertion. Gate the
+    # payment on an event set once the probes are done (the 30s bound
+    # merely prevents a hang if the test fails before setting it).
+    # Patched on router_module, not on node: the node fixture wires the
+    # fake in as router_module.pay_invoice (a bound method captured at
+    # fixture setup), so the instance attribute is not on the call path.
     payment_gate = threading.Event()
-    real_pay_invoice = node.pay_invoice
+    real_pay_invoice = router_module.pay_invoice
 
     async def gated_pay_invoice(invoice, config, fee_limit_msat):
         for _ in range(600):
@@ -834,7 +837,7 @@ def test_withdraw_by_hash_reports_pending_the_same_way_k1_would(
             await asyncio.sleep(0.05)
         return await real_pay_invoice(invoice, config, fee_limit_msat)
 
-    monkeypatch.setattr(node, "pay_invoice", gated_pay_invoice)
+    monkeypatch.setattr(router_module, "pay_invoice", gated_pay_invoice)
 
     thread = _melt_in_background(client, k1, pr, monkeypatch)
     pending = client.get(f"/w?p={k1_hash(k1)}").json()
@@ -851,17 +854,18 @@ def test_failed_melt_restores_hash_lookup_value(client: TestClient, node: FakeNo
     note_id = k1_id(k1)
     node.pay_delay = 0.3
 
-    # Hold the pending window open deterministically: melt_in_background
-    # only waits until the note is marked pending; the window is then kept
-    # open solely by FakeNode's 0.3s pay_delay sleep. Under load (CI, a
-    # busy build machine) the main thread can be scheduled later than
-    # that, so the payment completes - the note already spent or restored
-    # - before the concurrent request below lands and the "pending"
-    # assertion flakes. Gate the payment on an event the main thread sets
-    # only after receiving the concurrent response; the 30s bound merely
-    # prevents a hang if the test fails before setting it.
+    # Hold the pending window open deterministically: the melt helper only
+    # waits until the note is marked pending; the window is then kept open
+    # solely by FakeNode's pay_delay sleep, which a loaded machine can
+    # schedule the probe below past - the payment completes and the note is
+    # already spent or restored before the "pending" assertion. Gate the
+    # payment on an event set once the probes are done (the 30s bound
+    # merely prevents a hang if the test fails before setting it).
+    # Patched on router_module, not on node: the node fixture wires the
+    # fake in as router_module.pay_invoice (a bound method captured at
+    # fixture setup), so the instance attribute is not on the call path.
     payment_gate = threading.Event()
-    real_pay_invoice = node.pay_invoice
+    real_pay_invoice = router_module.pay_invoice
 
     async def gated_pay_invoice(invoice, config, fee_limit_msat):
         for _ in range(600):
@@ -870,7 +874,7 @@ def test_failed_melt_restores_hash_lookup_value(client: TestClient, node: FakeNo
             await asyncio.sleep(0.05)
         return await real_pay_invoice(invoice, config, fee_limit_msat)
 
-    monkeypatch.setattr(node, "pay_invoice", gated_pay_invoice)
+    monkeypatch.setattr(router_module, "pay_invoice", gated_pay_invoice)
     node.fail_payments = True
     thread = _melt_in_background(client, k1, fake_invoice(5000), monkeypatch)
     pending = client.get(f"/w?p={k1_hash(k1)}").json()
