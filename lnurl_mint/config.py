@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     fundingsource_url: str | None = None
     fundingsource_macaroon: SecretStr | None = None
     fundingsource_rune: SecretStr | None = None
+    fundingsource_rune_path: str | None = None
     # path to a self-signed TLS cert to verify the funding source against -
     # both lnd's and cln's REST APIs are commonly self-signed. Leave unset if
     # it's fronted by a reverse proxy with a real certificate.
@@ -232,6 +233,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"MIN_SENDABLE_MSAT ({self.min_sendable_msat}) exceeds MAX_SENDABLE_MSAT ({self.max_sendable_msat})."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _load_fundingsource_rune(self) -> "Settings":
+        rune_is_empty = self.fundingsource_rune is None or not self.fundingsource_rune.get_secret_value()
+        if rune_is_empty and self.fundingsource_rune_path:
+            with open(self.fundingsource_rune_path, encoding="utf-8") as rune_file:
+                self.fundingsource_rune = SecretStr(rune_file.read().strip())
         return self
 
     @field_validator("nostr_key")
