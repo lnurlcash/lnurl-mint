@@ -117,6 +117,50 @@ def verify_note(pubkey_hex: str, note_id_hex: str, amount_msat: int, signature_h
     return recovered.format(compressed=True).hex() == pubkey_hex
 
 
+def _rotation_message(spent_id_hex: str, note_id_hex: str, amount_msat: int) -> str:
+    """The message a rotation's `cr1` certificate commits to:
+    "LNURLcash:rotate:<amount_msat>:<hex(Q_spent)>:<hex(Q)>" - the note this
+    mint burned, the one note it credited in its place, and that note's
+    value. Told apart from a note's own certificate (_message) by its
+    second field, which there is always a decimal amount."""
+    return f"{_DOMAIN_TAG}:rotate:{amount_msat}:{spent_id_hex}:{note_id_hex}"
+
+
+async def sign_rotation(
+    spent_id_hex: str, note_id_hex: str, amount_msat: int, config: LightningBackendConfig
+) -> str | None:
+    """A recoverable signature over a rotation - this mint burned the note
+    `spent_id_hex` and credited exactly the one note `note_id_hex`, worth
+    `amount_msat`, in its place - signed and encoded the same way as
+    sign_note's own. Only ever called for a rotate: a split has two outputs
+    and a merge several inputs, so neither can say "this note became that
+    one". What a holder cannot learn from a note's own `cs1`: that the note
+    descends from one particular other note, and from nothing else - which
+    is what an asset anchored to a note (lnurl-wallet's Seals) needs every
+    one of its transfers to prove. It is this key's statement about this
+    mint's own database, nothing more: the message names no mint. None if
+    signing isn't possible right now - never raises, same as sign_note."""
+    if not config.backend:
+        return None
+    try:
+        r_s, recovery_id = await sign_message(_rotation_message(spent_id_hex, note_id_hex, amount_msat), config)
+    except Exception as exc:
+        logging.warning("sign_rotation: could not sign via %s funding source: %s", config.backend, exc)
+        return None
+    return (r_s + bytes([recovery_id])).hex()
+
+
+def verify_rotation(pubkey_hex: str, spent_id_hex: str, note_id_hex: str, amount_msat: int, signature_hex: str) -> bool:
+    """Verifies a signature produced by sign_rotation against a mintPubkey -
+    the check a WALLET performs offline for every step of a note's lineage.
+    This mint never calls it itself; it exists for the test suite, same as
+    verify_note."""
+    signature = bytes.fromhex(signature_hex)
+    digest = lightning_signed_message_digest(_rotation_message(spent_id_hex, note_id_hex, amount_msat))
+    recovered = PublicKey.from_signature_and_message(signature, digest, hasher=None)
+    return recovered.format(compressed=True).hex() == pubkey_hex
+
+
 # Everything a WALLET signs outside a note spend - the registration
 # ownership proof below - is a plain BIP-340 Schnorr signature over
 # sha256(a message): BIP-340 signers only accept a 32-byte message. A note

@@ -52,6 +52,26 @@ def test_cs1_roundtrip_carries_the_amount_in_its_hrp(amount_msat):
     assert bech32m.decode_cs1(encoded) == (amount_msat, sig)
 
 
+@pytest.mark.parametrize("amount_msat", [0, 1, 1000, 21000, 5000, 100_000_000])
+def test_cr1_roundtrip_carries_the_amount_in_its_hrp(amount_msat):
+    """cr1, a rotation certificate, is a cs1 under its own prefix."""
+    sig = urandom(65)
+    encoded = bech32m.encode_cr1(amount_msat, sig)
+    assert encoded.startswith("cr")
+    assert bech32m.decode_cr1(encoded) == (amount_msat, sig)
+    assert len(encoded) == len(bech32m.encode_cs1(amount_msat, sig))
+
+
+def test_cs1_and_cr1_never_decode_as_each_other():
+    """One says a note exists, the other where it came from - a verifier
+    handed the wrong kind must see nothing, not a signature to try."""
+    sig = urandom(65)
+    assert bech32m.decode_cr1(bech32m.encode_cs1(1000, sig)) is None
+    assert bech32m.decode_cs1(bech32m.encode_cr1(1000, sig)) is None
+    with pytest.raises(ValueError):
+        bech32m.encode_cr1(1000, urandom(64))
+
+
 def test_encoded_lengths_match_the_spec():
     """25.md's Encoding section states each prefix's exact total length."""
     assert len(bech32m.encode_cp1(urandom(32))) == 61
