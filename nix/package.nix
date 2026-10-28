@@ -10,7 +10,23 @@
 }:
 
 let
-  python3Packages = python3.pkgs;
+  # nixpkgs currently trails the certifi release which removes the distrusted
+  # root covered by PYSEC-2026-4320. Override the Python scope so httpx and the
+  # application both resolve to the same patched package.
+  python3Packages = python3.pkgs.overrideScope (
+    final: _prev: {
+      certifi = final.buildPythonPackage {
+        pname = "certifi";
+        version = "2026.10.23";
+        format = "wheel";
+        src = fetchurl {
+          url = "https://files.pythonhosted.org/packages/32/d1/a3652fe2c19134d0d15922177821d863cbd7e842d53a21bbe7e8e3a1b5ac/certifi-2026.10.23-py3-none-any.whl";
+          sha256 = "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1";
+        };
+        pythonImportsCheck = [ "certifi" ];
+      };
+    }
+  );
 
   # not in nixpkgs (lnbits' BOLT11 codec) - pinned to the same version and
   # hash as uv.lock. Its upstream `requires-python = ">=3.10,<3.13"` cap is
@@ -117,6 +133,7 @@ let
       python-dotenv
       bolt11
       httpx
+      certifi
       pydantic-settings
       qrcode
       bech32

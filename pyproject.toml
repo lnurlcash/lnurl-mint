@@ -7,7 +7,7 @@ license = "MIT"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "fastapi>=0.115.11,<0.116.0",
+  "fastapi>=0.162.0,<0.163.0",
   # uvicorn directly, not fastapi[standard]/fastapi-cli - both pull in
   # fastapi-cloud-cli (a "cloud" CLI feature, plus sentry-sdk as its own
   # dependency), extra supply-chain surface this app never uses. [standard]
@@ -15,6 +15,9 @@ dependencies = [
   # uvloop (faster parsing/event loop).
   "uvicorn[standard]>=0.34.0",
   "bolt11",
+  # bolt11 imports ConstBitStream, which bitstring 5 removed.
+  "bitstring<5",
+  "certifi>=2026.10.23",
   "httpx",
   "pydantic-settings>=2.0,<3.0",
   "qrcode>=8.2",
