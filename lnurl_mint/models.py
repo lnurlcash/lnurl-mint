@@ -172,12 +172,14 @@ class WithdrawSuccessResponse(BaseModel):
     settlement-proof URL, present only when VERIFY_ENABLED. `c`/`c2`
     are this mint's Offline-verification certificates over a rotate/split/
     merge's `p1`/`p2` (see signing.sign_note) - `c2` only for a split,
-    both omitted if no funding source is configured. None fields are
-    excluded on the wire."""
+    both omitted if no funding source is configured. `r` is its rotation
+    certificate (see signing.sign_rotation), only for a rotate: one note
+    in, one note out. None fields are excluded on the wire."""
 
     status: Literal["OK"] = "OK"
     c: str | None = None
     c2: str | None = None
+    r: str | None = None
     pr: str | None = None
     verify: str | None = None
 

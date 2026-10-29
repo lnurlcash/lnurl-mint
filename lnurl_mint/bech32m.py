@@ -91,21 +91,21 @@ encode_cp1, decode_cp1 = _fixed_length_codec("cp", 32)
 # Encoding - so a verifier reads the amount straight off the certificate,
 # nothing needs to travel alongside it. That variable-width HRP is why cs1
 # can't reuse _fixed_length_codec (built for a fixed 2-char one).
-def encode_cs1(amount_msat: int, signature: bytes) -> str:
+def _encode_certificate(prefix: str, amount_msat: int, signature: bytes) -> str:
     if len(signature) != 65:
-        raise ValueError(f"cs1... payload must be 65 bytes, got {len(signature)}")
-    return encode(f"cs{msat_to_amount(amount_msat)}", signature)
+        raise ValueError(f"{prefix}1... payload must be 65 bytes, got {len(signature)}")
+    return encode(f"{prefix}{msat_to_amount(amount_msat)}", signature)
 
 
-def decode_cs1(s: str) -> tuple[int, bytes] | None:
-    """Inverse of encode_cs1: (amount_msat, signature), or None on any
-    malformed input - missing/unparsable "cs<amount>" HRP, bad checksum, or
-    a non-65-byte payload - never raises, same contract as decode() above.
-    Reimplements decode()'s body rather than calling it: that function
-    matches against one fixed, already-known `hrp`, but here the HRP itself
-    (specifically, the amount encoded in it) is exactly what's being
-    recovered, so it has to be split out of `s` before the checksum can
-    even be verified against it."""
+def _decode_certificate(prefix: str, s: str) -> tuple[int, bytes] | None:
+    """(amount_msat, signature) of a certificate under `prefix`, or None on
+    any malformed input - missing/unparsable "<prefix><amount>" HRP, bad
+    checksum, or a non-65-byte payload - never raises, same contract as
+    decode() above. Reimplements decode()'s body rather than calling it:
+    that function matches against one fixed, already-known `hrp`, but here
+    the HRP itself (specifically, the amount encoded in it) is exactly
+    what's being recovered, so it has to be split out of `s` before the
+    checksum can even be verified against it."""
     if any(ord(c) < 33 or ord(c) > 126 for c in s):
         return None
     if s.lower() != s and s.upper() != s:
@@ -115,10 +115,10 @@ def decode_cs1(s: str) -> tuple[int, bytes] | None:
     if pos < 1 or pos + 7 > len(s):
         return None
     found_hrp, data_part = s[:pos], s[pos + 1 :]
-    if not found_hrp.startswith("cs") or not all(c in CHARSET for c in data_part):
+    if not found_hrp.startswith(prefix) or not all(c in CHARSET for c in data_part):
         return None
     try:
-        amount_msat = int(amount_to_msat(found_hrp[2:]))
+        amount_msat = int(amount_to_msat(found_hrp[len(prefix) :]))
     except Bolt11AmountInvalidException:
         return None
     data = [CHARSET.find(c) for c in data_part]
@@ -128,6 +128,31 @@ def decode_cs1(s: str) -> tuple[int, bytes] | None:
     if decoded is None or len(decoded) != 65:
         return None
     return amount_msat, bytes(decoded)
+
+
+def encode_cs1(amount_msat: int, signature: bytes) -> str:
+    return _encode_certificate("cs", amount_msat, signature)
+
+
+def decode_cs1(s: str) -> tuple[int, bytes] | None:
+    """Inverse of encode_cs1: (amount_msat, signature), or None on any
+    malformed input - see _decode_certificate."""
+    return _decode_certificate("cs", s)
+
+
+# cr1<sig>: a 65-byte recoverable signature, produced by SERVICE - a
+# rotation certificate: this mint's statement that one note was burned into
+# exactly one other (see signing.sign_rotation). The same shape as cs1,
+# amount in the HRP included ("cr10n" for 1000 msat), under its own prefix
+# so neither can ever be mistaken for the other.
+def encode_cr1(amount_msat: int, signature: bytes) -> str:
+    return _encode_certificate("cr", amount_msat, signature)
+
+
+def decode_cr1(s: str) -> tuple[int, bytes] | None:
+    """Inverse of encode_cr1: (amount_msat, signature), or None on any
+    malformed input - see _decode_certificate."""
+    return _decode_certificate("cr", s)
 
 
 # cx1<P || chaincode>: a 64-byte watch-only export of a WALLET's derivation

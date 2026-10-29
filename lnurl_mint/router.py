@@ -39,7 +39,7 @@ from .node import (
     pay_invoice,
     payment_preimage,
 )
-from .signing import mint_pubkey, sign_note, verify_register_signature
+from .signing import mint_pubkey, sign_note, sign_rotation, verify_register_signature
 
 router = APIRouter()
 router.route_class = LnurlErrorResponseHandler
@@ -1167,6 +1167,33 @@ async def _certificate(note_id_hex: str, amount_msat: int, funding_source: Light
     return bech32m.encode_cs1(amount_msat, bytes.fromhex(raw))
 
 
+async def _rotation_certificate(
+    spent_id_hex: str, note_id_hex: str, amount_msat: int, funding_source: LightningBackendConfig
+) -> str | None:
+    """This mint's certificate for a rotation, `cr1<...>` over (Q_spent, Q,
+    amount): it burned the one note and credited exactly the other in its
+    place. None if signing isn't available right now (see sign_rotation)."""
+    raw = await sign_rotation(spent_id_hex, note_id_hex, amount_msat, funding_source)
+    if raw is None:
+        return None
+    return bech32m.encode_cr1(amount_msat, bytes.fromhex(raw))
+
+
+async def _rotate_certificates(
+    spent_id_hex: str, note_id_hex: str, amount_msat: int, funding_source: LightningBackendConfig
+) -> tuple[str | None, str | None]:
+    """A rotate's two certificates, (`c`, `r`): the new note's own and the
+    rotation's. Signed side by side rather than one after the other, so a
+    rotate waits for the funding source once, as it did before `r` existed -
+    and once, not twice, when the funding source does not answer at all.
+    Either is None on its own if its signing failed."""
+    certificate, rotation = await asyncio.gather(
+        _certificate(note_id_hex, amount_msat, funding_source),
+        _rotation_certificate(spent_id_hex, note_id_hex, amount_msat, funding_source),
+    )
+    return certificate, rotation
+
+
 @router.get("/w", tags=["lnurlcash"], response_model=LnurlWithdrawResponse | LnurlErrorResponse)
 async def get_withdraw(
     req: Request,
@@ -1292,6 +1319,9 @@ async def get_withdraw_callback(
     - Every note minted here (never on melt) is signed per Offline
       verification, over the hash WALLET supplied - omitted if no funding
       source is configured or signing fails (see signing.sign_note).
+    - A rotate (one k1, no amount) additionally gets `r`, a `cr1` rotation
+      certificate over the burned note, `p1` and the amount (see
+      signing.sign_rotation) - a split or merge never does.
     - If any k1 is invalid the whole request fails atomically
       (NoteStore.swap); a k1 already reserved by another in-flight melt
       fails with reason "pending" instead (NoteStore.mark_pending).
@@ -1299,7 +1329,7 @@ async def get_withdraw_callback(
       that setting's own docstring in config.py.
     - LUD-25's Retrying a mutation: a rotate/split/merge whose k1(s), p1, p2
       and amount exactly match an earlier completed one gets that same
-      result replayed (c/c2 recomputed, deterministic per RFC6979)
+      result replayed (c/c2/r recomputed, deterministic per RFC6979)
       instead of "already spent" (see NoteStore.find_burn/swap). Melt is
       unaffected - LUD-25 only asks this of rotate/split/merge."""
     if len(k1) > settings.max_k1s:
@@ -1360,6 +1390,11 @@ async def get_withdraw_callback(
             recorded_amount = amount1_msat if recorded_p2 is not None else None
             if recorded_p1 == p1_id and recorded_p2 == p2_id and recorded_amount == amount:
                 funding_source = settings.funding_source()
+                # only a rotate - one note in, one note out - has a rotation
+                # to certify, same condition as the live path below
+                if len(note_ids) == 1 and recorded_p2 is None:
+                    sig, rotation = await _rotate_certificates(note_ids[0], recorded_p1, amount1_msat, funding_source)
+                    return WithdrawSuccessResponse(c=sig, r=rotation)
                 sig = await _certificate(recorded_p1, amount1_msat, funding_source)
                 sig2 = (
                     await _certificate(recorded_p2, amount2_msat, funding_source)
@@ -1490,7 +1525,12 @@ async def get_withdraw_callback(
         refund = (len(note_ids) - 1) * settings.base_fee_msat
         merged_amount = total_msat + refund
         notes.swap(note_ids, [p1_id], [merged_amount])
-        return WithdrawSuccessResponse(c=await _certificate(p1_id, merged_amount, settings.funding_source()))
+        funding_source = settings.funding_source()
+        if len(note_ids) == 1:
+            sig, rotation = await _rotate_certificates(note_ids[0], p1_id, merged_amount, funding_source)
+            return WithdrawSuccessResponse(c=sig, r=rotation)
+        # a merge has no single note to name as the one that became p1
+        return WithdrawSuccessResponse(c=await _certificate(p1_id, merged_amount, funding_source))
     except OutputCollisionError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
     except PendingNoteError:
