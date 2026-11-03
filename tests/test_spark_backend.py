@@ -539,7 +539,7 @@ def test_sign_message_produces_spec_signatures_locally(spark_sdk):
     # NO sdk call at all - purely local key material, so signing can never
     # fail for network reasons mid-rotate/split/merge (the fake's
     # sign_message would assert if the backend tried the SDK's)
-    message = "LNURLcash:5000:" + "ab" * 32
+    message = "LNURLcash:testserver:5000:" + "ab" * 32
     assert spark_sdk.user_settings_calls == 0 and spark_sdk.sync_wallet_calls == 0
     r_s, recovery_id = _run(node_module.sign_message(message, SPARK_CONFIG))
     assert spark_sdk.user_settings_calls == 0 and spark_sdk.sync_wallet_calls == 0
