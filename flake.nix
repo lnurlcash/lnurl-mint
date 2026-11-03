@@ -11,6 +11,25 @@
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+
+      # nixpkgs' python with the one upstream test that breaks the build
+      # patched out: rich's test_brokenpipeerror expects `python -m rich |
+      # head -1` to exit 1, which the build sandbox's pipe handling doesn't
+      # reproduce (0 == 1 on python3.14). Rich itself is fine; it is only a
+      # transitive dependency of the runtime closure.
+      pythonFor =
+        pkgs:
+        let
+          python = pkgs.python3.override {
+            self = python;
+            packageOverrides = _: super: {
+              rich = super.rich.overridePythonAttrs (old: {
+                disabledTests = (old.disabledTests or [ ]) ++ [ "test_brokenpipeerror" ];
+              });
+            };
+          };
+        in
+        python;
     in
     {
       packages = forAllSystems (
@@ -19,7 +38,10 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         rec {
-          lnurl-mint = pkgs.callPackage ./nix/package.nix { src = self; };
+          lnurl-mint = pkgs.callPackage ./nix/package.nix {
+            src = self;
+            python3 = pythonFor pkgs;
+          };
           default = lnurl-mint;
         }
       );
@@ -35,13 +57,14 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          python = pythonFor pkgs;
           runtimeDeps = self.packages.${system}.lnurl-mint.passthru.runtimeDeps;
 
           # nixpkgs ships black 26, whose new hugging style would reformat
           # the tree and fight CI - the project pins black 24 (see
           # pyproject), so the shell provides the pinned version, same
           # version+hash as uv.lock
-          black = pkgs.python3Packages.buildPythonPackage rec {
+          black = python.pkgs.buildPythonPackage rec {
             pname = "black";
             version = "24.10.0";
             pyproject = true;
@@ -49,13 +72,13 @@
               inherit pname version;
               hash = "sha256-hG6mTJev47xne3YXh5k75JkYEOzHpKk3gW3Wvd7cSHU=";
             };
-            build-system = with pkgs.python3Packages; [
+            build-system = with python.pkgs; [
               hatchling
               hatch-fancy-pypi-readme
               hatch-vcs
             ];
             env.SETUPTOOLS_SCM_PRETEND_VERSION = version;
-            dependencies = with pkgs.python3Packages; [
+            dependencies = with python.pkgs; [
               click
               mypy-extensions
               packaging
@@ -72,7 +95,7 @@
           # venv entirely (coincurve comes prebuilt from nixpkgs)
           default = pkgs.mkShell {
             packages = [
-              (pkgs.python3.withPackages (
+              (python.withPackages (
                 ps:
                 runtimeDeps ps
                 ++ [
