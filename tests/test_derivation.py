@@ -1,5 +1,11 @@
-"""LUD-25 Seed & derivation - the SERVICE-side non-hardened tweak
-(derivation.derive_pubkey), independent of any router/HTTP wiring."""
+"""LUD-26 Seed & derivation, the SERVICE-side half: BIP-32 CKDpub from a
+share's cx1 (derivation.derive_note_pubkey), and the superseded per-note
+tweak a username registered before LUD-26 still auto-mints under
+(derivation.legacy_derive_pubkey), independent of any router/HTTP
+wiring."""
+
+import json
+from pathlib import Path
 
 from coincurve import PrivateKey, PublicKeyXOnly
 
@@ -8,9 +14,11 @@ from lnurl_mint.derivation import (
     PURPOSE_CHANGE,
     PURPOSE_LIGHTNING_ADDRESS,
     PURPOSE_WALLET,
-    derive_pubkey,
+    ckd_pub,
+    derive_note_pubkey,
     tagged_hash,
 )
+from lnurl_mint.derivation import legacy_derive_pubkey as derive_pubkey
 
 
 def _branch() -> tuple[bytes, bytes]:
@@ -166,7 +174,7 @@ def test_matches_lud25_spec_test_vector_1_cx1_encoding():
     """cx1<P || chain_code> from the same vector, via this implementation's
     own bech32m encoder - confirms it agrees with the kit's @scure/base one
     byte-for-byte, not just the underlying point math."""
-    from lnurl_mint.bech32m import encode_cx1
+    from lnurl_mint.bech32m import encode_legacy_cx1 as encode_cx1
 
     branch_point = bytes.fromhex("b783d2930dc053a971f019054ca43e7c9de50e0769de872dd1ddde5d0bf4c9d1")
     chain_code = bytes.fromhex("ab91cc11aea395ea6b62292a6147f51ef4150ebea04e745137b68719e238f904")
@@ -197,7 +205,7 @@ def test_matches_lud25_spec_test_vector_2():
 
 
 def test_matches_lud25_spec_test_vector_2_cx1_encoding():
-    from lnurl_mint.bech32m import encode_cx1
+    from lnurl_mint.bech32m import encode_legacy_cx1 as encode_cx1
 
     branch_point = bytes.fromhex("64885a9cab93ec051761b8a0b80e1854a61865878d58f72a365dfd640850f675")
     chain_code = bytes.fromhex("6b95795f9807ada85c8ca50ec93c921483a183abfed4a3b4abe6b95c89880306")
@@ -218,3 +226,52 @@ def test_a_tweak_hash_at_or_above_n_is_reduced_mod_n(monkeypatch):
     above_n = derive_pubkey(branch_point, chain_code, PURPOSE_WALLET, 0)
     monkeypatch.setattr(derivation, "tagged_hash", lambda tag, msg: reduced.to_bytes(32, "big"))
     assert above_n == derive_pubkey(branch_point, chain_code, PURPOSE_WALLET, 0)
+
+
+# ---- LUD-26: BIP-32 CKDpub from a share's cx1 ----
+
+
+def test_ckd_pub_matches_bip32_test_vector_1():
+    """BIP-32's own "Test vector 1": m/0'H -> m/0'H/1, the one public
+    derivation step in it."""
+    pubkey = bytes.fromhex("035a784662a4a20a65bf6aab9ae98a6c068a81c52e4b032c0fb5400c706cfccc56")
+    chain_code = bytes.fromhex("47fdacbd0f1097043b78c63c20c34ef4ed9a111d980047ad16282c7ae6236141")
+    child, child_chain_code = ckd_pub(pubkey, chain_code, 1)
+    assert child.hex() == "03501e454bf00751f24b1b489aa925215d66af2234e3891c3b21a52bedb3cd711c"
+    assert child_chain_code.hex() == "2a7857631386ba23dacac34180dd1983734e444fdbf774041578e9b6adb37c19"
+
+
+def test_a_hardened_index_or_a_bad_key_is_refused():
+    pubkey = PrivateKey().public_key.format(compressed=True)
+    for index in [0x80000000, 0xFFFFFFFF, -1]:
+        try:
+            ckd_pub(pubkey, bytes(32), index)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"index {index} derived")
+    try:
+        ckd_pub(pubkey[1:], bytes(32), 0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an x-only key derived")
+
+
+def test_every_share_note_in_the_lud26_vectors():
+    """lnurl/luds 26-vectors.json: every share note S/a'/2/n'/i, derived
+    from its share's cx1 alone, as this mint credits it."""
+    from lnurl_mint.bech32m import decode_cx1
+
+    vectors = json.loads((Path(__file__).parent / "vectors" / "26-vectors.json").read_text())
+    checked = 0
+    for derivation_case in vectors["derivation"]:
+        for account in derivation_case["accounts"]:
+            for share in account["shareable"]:
+                cx1 = decode_cx1(share["cx1"])
+                assert cx1 is not None
+                assert cx1.hex() == share["chaincode"] + share["P"]
+                for note in share["notes"]:
+                    assert derive_note_pubkey(cx1, note["i"]).hex() == note["Q"]
+                    checked += 1
+    assert checked >= 8

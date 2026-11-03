@@ -13,7 +13,7 @@ from .config import settings
 from .errors import log_internal_error
 from .frontend import frontend_router
 from .node import LightningBackendConfig, fetch_node_info
-from .router import publish_zap_receipts, reconcile_pending_melts, router
+from .router import publish_zap_receipts, reconcile_pending_melts, router, settle_polled_mints
 
 
 async def _reconcile_pending_melts_safely(funding_source: LightningBackendConfig) -> None:
@@ -84,6 +84,20 @@ async def _publish_zap_receipts_forever(funding_source: LightningBackendConfig) 
             log_internal_error("publish_zap_receipts failed", exc)
 
 
+async def _settle_polled_mints_forever() -> None:
+    """LUD-26: a registered Lightning Address's mint names no note until it
+    settles, so no lookup can settle it lazily - this mint asks (see
+    router.settle_polled_mints; a round with nothing pending is one cheap
+    query). Only run while zaps are off: the zap loop settles them too.
+    Cancelled from lifespan at shutdown."""
+    while True:
+        await asyncio.sleep(settings.zap_poll_interval_seconds)
+        try:
+            await settle_polled_mints()
+        except Exception as exc:
+            log_internal_error("settle_polled_mints failed", exc)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # LUD-25: a bearer note's k1 lives in the query string of /w and
@@ -116,6 +130,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     funding_source = settings.funding_source()
     monitor_task: asyncio.Task | None = None
     zap_task: asyncio.Task | None = None
+    settle_task: asyncio.Task | None = None
     if not funding_source.backend:
         logging.warning(
             "No funding source configured (FUNDINGSOURCE_BACKEND unset) - "
@@ -157,9 +172,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                     "to a description hash - zaps stay off."
                 )
 
+        if zap_task is None and settings.username_registration_enabled:
+            settle_task = asyncio.create_task(_settle_polled_mints_forever())
+
     yield
 
-    for task in (monitor_task, zap_task):
+    for task in (monitor_task, zap_task, settle_task):
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -192,8 +210,9 @@ app = FastAPI(
 # every endpoint here is a public LNURL wire-protocol endpoint, meant to be
 # fetched cross-origin by arbitrary third-party wallets; none reads a
 # cookie, so a wide-open origin is safe. allow_methods must cover more than
-# GET: POST/DELETE /p/{username} (router.upsert_registered_username,
-# delete_registered_username) are real cross-origin wallet calls too, and a
+# GET: POST/PUT/DELETE /.well-known/lnurlp/{username} (router.register_username,
+# update_registered_username, delete_registered_username) are real
+# cross-origin wallet calls too, and a
 # non-GET method always triggers a real preflight (unlike a bodyless GET/
 # POST, which Starlette's CORSMiddleware answers from its own unconditional
 # simple-response path regardless of allow_methods - only the preflight

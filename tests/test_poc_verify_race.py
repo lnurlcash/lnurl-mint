@@ -138,7 +138,7 @@ def test_melt_direction_verify_is_harmless(client: TestClient, node: FakeNode, m
     assert notes.note_amount(bearer_id(attacker_h)) is None
     # and the original note's secret is equally dead (already burned)
     r = client.get(f"/w/cb?k1={k1}&p1={attacker_h}")
-    assert r.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+    assert r.json() == {"status": "ERROR", "reason": "already in use"}
 
 
 def test_verify_disabled_closes_the_hole(client: TestClient, node: FakeNode):

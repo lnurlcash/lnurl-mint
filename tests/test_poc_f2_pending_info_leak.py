@@ -67,7 +67,7 @@ def test_w_reports_pending_during_melt_window(client: TestClient, node, mint_not
 
     # AFTER the melt settles, the note is spent for good - the third,
     # distinct state (unknown vs pending vs spent all report separately)
-    assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "Note already spent."}
+    assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "already in use"}
 
 
 def test_w_shows_the_note_again_after_a_failed_melt_restores_it(client: TestClient, node, mint_note):

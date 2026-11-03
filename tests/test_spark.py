@@ -155,10 +155,10 @@ def test_offline_verification_signs_with_the_seed_derived_key():
     from lnurl_mint.signing import mint_pubkey, verify_note
     from lnurl_mint.spark import signing_pubkey_hex
 
-    message = "LNURLcash:5000:" + "ab" * 32
+    message = "LNURLcash:testserver:5000:" + "ab" * 32
     r_s, recovery_id = _run(spark_module._sign_message_spark(message, SPARK_CONFIG))
     signature = (r_s + bytes([recovery_id])).hex()
-    assert verify_note(signing_pubkey_hex(SPARK_CONFIG), "ab" * 32, 5000, signature)
+    assert verify_note(signing_pubkey_hex(SPARK_CONFIG), "ab" * 32, "testserver", 5000, signature)
     assert _run(mint_pubkey(SPARK_CONFIG)) == signing_pubkey_hex(SPARK_CONFIG)
 
 

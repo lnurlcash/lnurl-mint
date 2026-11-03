@@ -183,14 +183,21 @@ class WithdrawSuccessResponse(BaseModel):
 
 
 class RegisterUsernameResponse(BaseModel):
-    """LUD-25's cx1 registration (router's POST/DELETE
-    /p/{username}) - claims or frees `username` for/from a WALLET's
-    watch-only branch. A fresh claim is first-come-first-served, no proof
-    of possession; overwriting or deleting an existing one needs an
-    ownership-proof signature instead (see
-    router.upsert_registered_username, NoteStore.upsert_username). A bare
-    success marker; the error case is the ordinary
-    {"status": "ERROR", "reason": ...} every other endpoint here uses."""
+    """LUD-26's Lightning Address registration (router's POST/PUT/DELETE
+    /.well-known/lnurlp/{username}) - registers, moves or frees `username`
+    for a share's cx1, always proven by a share's own key (see
+    router.register_username). A bare success marker; the error case is the
+    ordinary {"status": "ERROR", "reason": ...} every other endpoint here
+    uses."""
+
+    status: Literal["OK"] = "OK"
+
+
+class InternalTransferResponse(BaseModel):
+    """LUD-26's internal transfer (router.get_pay_callback_for_username with
+    a `k1`): the note was burned and its full value credited to the payee's
+    share. A bare success marker - the payer learns nothing of the note it
+    landed on."""
 
     status: Literal["OK"] = "OK"
 

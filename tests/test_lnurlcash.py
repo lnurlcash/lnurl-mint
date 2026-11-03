@@ -400,7 +400,8 @@ def test_retry_with_a_different_h_is_a_conflict_not_a_replay(client: TestClient,
     first = client.get(f"/w/cb?k1={k1}&p1={h}").json()
     assert first["status"] == "OK"
     conflict = client.get(f"/w/cb?k1={k1}&p1={other_h}").json()
-    assert conflict == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+    # LUD-25: a retry naming other outputs is answered "already in use"
+    assert conflict == {"status": "ERROR", "reason": "already in use"}
 
 
 def test_melt_pays_invoice_of_exactly_the_notes_value(client: TestClient, node: FakeNode, mint_note):
@@ -750,7 +751,7 @@ def test_withdraw_by_hash_reports_a_retained_spent_note(client: TestClient, mint
     # Both lookup forms report the retained spent record, while a never
     # registered hash remains unknown. These reads do not reissue the note.
     for lookup in (f"p={k1_hash(k1)}", f"k1={k1}"):
-        assert client.get(f"/w?{lookup}").json() == {"status": "ERROR", "reason": "Note already spent."}
+        assert client.get(f"/w?{lookup}").json() == {"status": "ERROR", "reason": "already in use"}
     assert notes.note_spent(note_id)
     assert client.get(f"/w?p={urandom(32).hex()}").json() == {"status": "ERROR", "reason": "Unknown note."}
 
@@ -774,7 +775,7 @@ def test_withdraw_by_hash_reports_pending_the_same_way_k1_would(
     thread.join()
 
     assert pending == {"status": "ERROR", "reason": "pending"}
-    assert client.get(f"/w?p={k1_hash(k1)}").json() == {"status": "ERROR", "reason": "Note already spent."}
+    assert client.get(f"/w?p={k1_hash(k1)}").json() == {"status": "ERROR", "reason": "already in use"}
     assert notes.note_spent(note_id)
 
 
@@ -806,7 +807,7 @@ def test_withdraw_reports_unknown_k1_distinctly_from_spent(client: TestClient, m
     _, h = fresh_secret()
     assert client.get(f"/w/cb?k1={k1}&p1={h}").json()["status"] == "OK"
     spent = client.get(f"/w?k1={k1}").json()
-    assert spent == {"status": "ERROR", "reason": "Note already spent."}
+    assert spent == {"status": "ERROR", "reason": "already in use"}
 
 
 def test_withdraw_ignores_the_declared_amount(client: TestClient, mint_note):

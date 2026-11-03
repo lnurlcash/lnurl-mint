@@ -66,7 +66,7 @@ def test_informational_get_includes_cs1_certificate(client: TestClient, node: Fa
     assert "c" in data
     amount_msat, sig = bech32m.decode_cs1(data["c"])
     assert amount_msat == 5000
-    digest = lightning_signed_message_digest(f"LNURLcash:{amount_msat}:{bech32m.decode_cp1(cp1).hex()}")
+    digest = lightning_signed_message_digest(f"LNURLcash:testserver:{amount_msat}:{bech32m.decode_cp1(cp1).hex()}")
     recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
     assert recovered.format(compressed=True).hex() == node.pubkey
 
@@ -79,7 +79,7 @@ def test_bearer_note_informational_get_includes_cs1_too(client: TestClient, node
     data = client.get(f"/w?k1={k1}").json()
     amount_msat, sig = bech32m.decode_cs1(data["c"])
     assert amount_msat == 5000
-    digest = lightning_signed_message_digest(f"LNURLcash:{amount_msat}:{k1_id(k1)}")
+    digest = lightning_signed_message_digest(f"LNURLcash:testserver:{amount_msat}:{k1_id(k1)}")
     recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
     assert recovered.format(compressed=True).hex() == node.pubkey
 
@@ -120,7 +120,7 @@ def test_recovery_scan_via_p_equals_cp1_also_includes_cs1_certificate(client: Te
     assert "c" in data
     amount_msat, sig = bech32m.decode_cs1(data["c"])
     assert amount_msat == 5000
-    digest = lightning_signed_message_digest(f"LNURLcash:{amount_msat}:{bech32m.decode_cp1(cp1).hex()}")
+    digest = lightning_signed_message_digest(f"LNURLcash:testserver:{amount_msat}:{bech32m.decode_cp1(cp1).hex()}")
     recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
     assert recovered.format(compressed=True).hex() == node.pubkey
 
@@ -132,7 +132,7 @@ def test_recovery_scan_reports_a_spent_cp1_note_as_spent_not_unknown(client: Tes
     assert client.get(f"/w/cb?k1={k1}&p1={new_cp1}").json()["status"] == "OK"
 
     data = client.get(f"/w?p={cp1}").json()
-    assert data == {"status": "ERROR", "reason": "Note already spent."}
+    assert data == {"status": "ERROR", "reason": "already in use"}
 
 
 def test_rotate_cp1_note_produces_cp1_output_with_certificate(client: TestClient, node: FakeNode):
@@ -144,12 +144,12 @@ def test_rotate_cp1_note_produces_cp1_output_with_certificate(client: TestClient
     amount_msat, sig = bech32m.decode_cs1(data["c"])
     assert amount_msat == 5000
     new_pk = bech32m.decode_cp1(new_cp1)
-    digest = lightning_signed_message_digest(f"LNURLcash:{amount_msat}:{new_pk.hex()}")
+    digest = lightning_signed_message_digest(f"LNURLcash:testserver:{amount_msat}:{new_pk.hex()}")
     recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
     assert recovered.format(compressed=True).hex() == node.pubkey
 
     # old note is burned, new one is spendable under the new key
-    assert client.get(f"/w?k1={k1}").json()["reason"] == "Note already spent."
+    assert client.get(f"/w?k1={k1}").json()["reason"] == "already in use"
     new_k1 = _ck1(new_sk)
     assert client.get(f"/w?k1={new_k1}").json()["maxWithdrawable"] == 5000
 

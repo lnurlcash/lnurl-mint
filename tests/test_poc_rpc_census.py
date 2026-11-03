@@ -169,7 +169,7 @@ def test_withdraw_info_census(client: TestClient, node: FakeNode, mint_note, cen
     assert client.get(f"/w/cb?k1={spent_k1}&p1={h}").json()["status"] == "OK"
     census.deltas()  # discard the rotate's own sign_message
     r = client.get(f"/w?k1={spent_k1}")
-    assert r.json() == {"status": "ERROR", "reason": "Note already spent."}
+    assert r.json() == {"status": "ERROR", "reason": "already in use"}
     assert census.deltas() == {}
 
 

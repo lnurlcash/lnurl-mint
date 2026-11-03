@@ -547,7 +547,7 @@ def test_sign_message_produces_spec_signatures_locally(spark_sdk):
 
     pubkey = signing_pubkey_hex(SPARK_CONFIG)
     signature = (r_s + bytes([recovery_id])).hex()
-    assert verify_note(pubkey, "ab" * 32, 5000, signature)
+    assert verify_note(pubkey, "ab" * 32, "testserver", 5000, signature)
 
     # RFC6979: deterministic nonces - the same message always signs identically
     again = _run(node_module.sign_message(message, SPARK_CONFIG))
@@ -572,9 +572,9 @@ def test_signing_key_is_derived_from_the_mnemonic():
 
 def test_sign_note_end_to_end_against_verify_note(spark_sdk):
     h = urandom(32).hex()
-    signature = _run(sign_note(h, 5000, SPARK_CONFIG))
+    signature = _run(sign_note(h, "testserver", 5000, SPARK_CONFIG))
     assert signature is not None
-    assert verify_note(signing_pubkey_hex(SPARK_CONFIG), h, 5000, signature)
+    assert verify_note(signing_pubkey_hex(SPARK_CONFIG), h, "testserver", 5000, signature)
 
 
 def test_mint_pubkey_advertises_the_derived_key(spark_sdk):
