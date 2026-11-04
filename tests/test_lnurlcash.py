@@ -71,7 +71,7 @@ def test_pay_response_omits_mint_fee_when_free(client: TestClient):
 
 def test_pay_response_advertises_mint_fee_when_configured(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 2000)
+    monkeypatch.setattr(settings, "fee_ppm", 2000)
     metadata = client.get(f"/.well-known/lnurlp/{settings.username}").json()["metadata"]
     assert ["text/plain", "Mint fees: 1000,2000"] in json.loads(metadata)
 
@@ -98,7 +98,7 @@ def test_pay_response_advertises_fee_inclusive_min_sendable(client: TestClient, 
 
 def test_mint_credits_note_net_of_configured_fee(client: TestClient, node: FakeNode, monkeypatch):
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 2000)  # 0.2%
+    monkeypatch.setattr(settings, "fee_ppm", 2000)  # 0.2%
 
     secret, comment = fresh_secret()
     client.get(f"/p/cb?amount=100000&comment={comment}")
@@ -111,7 +111,7 @@ def test_mint_credits_note_net_of_configured_fee(client: TestClient, node: FakeN
 
 def test_mint_fee_rounds_up_to_the_nearest_sat(client: TestClient, node: FakeNode, monkeypatch):
     monkeypatch.setattr(settings, "base_fee_msat", 0)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 1)  # 0.0001%
+    monkeypatch.setattr(settings, "fee_ppm", 1)  # 0.0001%
 
     secret, comment = fresh_secret()
     client.get(f"/p/cb?amount=100000000&comment={comment}")
@@ -268,12 +268,12 @@ def test_split_deducts_base_fee_from_change_when_mint_charges_fees(client: TestC
     assert note_value(client, change_k1) == 3000 - 1000
 
 
-def test_split_does_not_reapply_fee_percent_ppm(client: TestClient, mint_note, monkeypatch):
-    # per LUD-25, fee_percent_ppm was already withheld once at mint time -
+def test_split_does_not_reapply_fee_ppm(client: TestClient, mint_note, monkeypatch):
+    # per LUD-25, fee_ppm was already withheld once at mint time -
     # only the flat base_fee_msat is charged again on split
     k1 = mint_note(5000)
     monkeypatch.setattr(settings, "base_fee_msat", 0)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 500_000)  # 50%, if it were (wrongly) reapplied
+    monkeypatch.setattr(settings, "fee_ppm", 500_000)  # 50%, if it were (wrongly) reapplied
     _, h = fresh_secret()
     change_k1, h2 = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&amount=2000&p1={h}&p2={h2}").json()

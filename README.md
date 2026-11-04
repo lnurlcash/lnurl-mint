@@ -97,11 +97,11 @@ LUD-03 `k1` would, this mint disables uvicorn's per-request access log entirely
 (see `server.py`'s lifespan) rather than leave secrets in server logs by default;
 run it behind a reverse proxy if you want access logs for the other routes.
 
-**Mint fee** (optional): set `BASE_FEE_MSAT`/`FEE_PERCENT_PPM` to withhold a
+**Mint fee** (optional): set `BASE_FEE_MSAT`/`FEE_PPM` to withhold a
 flat amount plus a parts-per-million cut of every mint's `amount`, credited
 to `k1=P`'s note instead of the full amount paid - meant to cover the
 routing cost of eventually paying that note back out on melt. Advertised as
-an extra `["text/plain", "Mint fees: <base_fee_msat>,<fee_percent_ppm>"]`
+an extra `["text/plain", "Mint fees: <base_fee_msat>,<fee_ppm>"]`
 entry in the LUD-16 address's `metadata`, so a wallet that recognizes the `Mint fees: `
 prefix can warn the payer up front; omitted entirely (assumed fee-free per
 spec) when both are `0`. `MIN_MINT_MSAT` (default 10 sats) floors the note's
@@ -216,6 +216,21 @@ advertises no `commentAllowed` and publishes no key of the share, and a
 `USERNAME_REGISTRATION_ENABLED=false` to turn this off entirely (404, same
 off-switch convention as `VERIFY_ENABLED`). A registered username is always
 stored lowercase and matched case-insensitively.
+
+**Address fee** (optional, LUD-26): set `ADDRESS_FEE_MSAT` to charge for
+each registration, against spam. A valid registration is then answered with
+`{"status": "OK", "pr": <invoice for the fee>}`, and its username is held for
+it: not published, not auto-minting and taken for anybody else until that
+invoice is paid, then registered (a background poll notices the payment, as
+do LUD-21 verify and a lookup of the address); it is released if the invoice
+expires unpaid. The share is accepted at hold time, so it is never registered
+again either way. Pay it from any wallet, or melt a note of exactly the fee
+here: `GET /w/cb?k1=<spend>&pr=<the fee invoice>` then burns the note and
+registers the username in one step, with nothing routed, and burns nothing if
+the invoice is no longer payable. A `PUT` charges no fee; a `DELETE` refunds
+none. Advertised as a third value of the mint payRequest's `Mint fees`
+(`Mint fees: <base_fee_msat>,<fee_ppm>,<address_fee_msat>`, only at `mint@`,
+`_@` and `USERNAME@`). Default `0`, free.
 
 **Internal mint transfers** (LUD-26): a payer holding a note on this mint
 sends the note itself to the address's callback, `GET

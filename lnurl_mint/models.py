@@ -188,9 +188,13 @@ class RegisterUsernameResponse(BaseModel):
     for a share's cx1, always proven by a share's own key (see
     router.register_username). A bare success marker; the error case is the
     ordinary {"status": "ERROR", "reason": ...} every other endpoint here
-    uses."""
+    uses.
+
+    `pr` is LUD-26's address fee invoice, only on a registration while
+    ADDRESS_FEE_MSAT is set: the username is held until it is paid."""
 
     status: Literal["OK"] = "OK"
+    pr: str | None = None
 
 
 class InternalTransferResponse(BaseModel):

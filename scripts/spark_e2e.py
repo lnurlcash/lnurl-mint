@@ -118,7 +118,7 @@ class MintServer:
                 # buffer melts spend (the melt fee), so the loop is
                 # self-sustaining after the first mint
                 "BASE_FEE_MSAT=1000\n"
-                "FEE_PERCENT_PPM=0\n"
+                "FEE_PPM=0\n"
             )
         self.process: subprocess.Popen | None = None
         self.log = open(os.path.join(workdir, "mint-server.log"), "ab")

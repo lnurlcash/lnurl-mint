@@ -17,7 +17,7 @@ os.environ["BASE_URL"] = "http://testserver"
 # base_fee_msat defaults to 1000 (see config.py) - fee-free here so the many
 # assertions elsewhere that expect a minted note's value to equal the
 # amount paid keep working unchanged; fee behavior itself is exercised by
-# tests that monkeypatch settings.base_fee_msat/fee_percent_ppm directly
+# tests that monkeypatch settings.base_fee_msat/fee_ppm directly
 os.environ["BASE_FEE_MSAT"] = "0"
 # min_mint_msat defaults to 10_000 (see config.py) - 0 here so the many
 # small test amounts (e.g. 5000) elsewhere keep minting successfully; the
