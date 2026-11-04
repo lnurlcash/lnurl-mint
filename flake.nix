@@ -11,25 +11,6 @@
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-
-      # nixpkgs' python with the one upstream test that breaks the build
-      # patched out: rich's test_brokenpipeerror expects `python -m rich |
-      # head -1` to exit 1, which the build sandbox's pipe handling doesn't
-      # reproduce (0 == 1 on python3.14). Rich itself is fine; it is only a
-      # transitive dependency of the runtime closure.
-      pythonFor =
-        pkgs:
-        let
-          python = pkgs.python3.override {
-            self = python;
-            packageOverrides = _: super: {
-              rich = super.rich.overridePythonAttrs (old: {
-                disabledTests = (old.disabledTests or [ ]) ++ [ "test_brokenpipeerror" ];
-              });
-            };
-          };
-        in
-        python;
     in
     {
       packages = forAllSystems (
@@ -40,7 +21,7 @@
         rec {
           lnurl-mint = pkgs.callPackage ./nix/package.nix {
             src = self;
-            python3 = pythonFor pkgs;
+            python3 = pkgs.python3;
           };
           default = lnurl-mint;
         }
@@ -57,7 +38,7 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          python = pythonFor pkgs;
+          python = pkgs.python3;
           runtimeDeps = self.packages.${system}.lnurl-mint.passthru.runtimeDeps;
 
           # nixpkgs ships black 26, whose new hugging style would reformat
@@ -124,6 +105,18 @@
           # the package build itself runs the full pytest suite (see
           # package.nix's checkPhase)
           inherit (self.packages.${system}) lnurl-mint;
+
+          # nixpkgs certifi uses cacert rather than its bundled roots. Test
+          # the actual trust store before relaxing its PyPI version bound.
+          certifi-trust =
+            pkgs.runCommand "lnurl-mint-certifi-trust"
+              {
+                nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.certifi ])) ];
+              }
+              ''
+                python ${./nix/check-certifi.py}
+                touch $out
+              '';
 
           # cheap evaluation check: the module merges and produces a sane
           # unit without building a whole NixOS system

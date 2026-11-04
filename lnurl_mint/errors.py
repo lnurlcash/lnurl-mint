@@ -1,8 +1,21 @@
 import logging
 import os
 import secrets
+import sys
 
 from .config import settings
+
+
+class _ErrorFileHandler(logging.FileHandler):
+    def handleError(self, record: logging.LogRecord) -> None:
+        # Python 3.14.8 also sends delayed-open failures through handleError
+        # instead of raising them. Preserve log_internal_error's fallback,
+        # including when logging.raiseExceptions is false in production.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, OSError):
+            raise exc
+        super().handleError(record)
+
 
 # a dedicated logger/file, kept separate from the app's normal (stdout)
 # logging: internal error details (backend error bodies, connection info,
@@ -24,7 +37,7 @@ if not _logger.handlers:
     # error is actually logged, rather than at import time - an unwritable
     # directory must not crash the whole app over what's only a diagnostic
     # side channel, before a single request has even been served.
-    _handler = logging.FileHandler(log_path, delay=True)
+    _handler = _ErrorFileHandler(log_path, delay=True)
     _handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     _logger.addHandler(_handler)
 

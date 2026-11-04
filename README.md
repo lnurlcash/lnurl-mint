@@ -647,6 +647,15 @@ re-pinned in `pyproject.toml` without updating `nix/package.nix` fails the
 `nix/package.nix` - bump its pinned commit and `hash` there alongside any
 bolt11 version bump in `pyproject.toml`/`uv.lock`.
 
+The Python scope is intentionally unmodified so dependencies can use
+nixpkgs' binary cache. Nixpkgs patches `certifi` to use the system `cacert`
+bundle rather than its bundled certificates, so its version may be below
+the PyPI security floor while using an updated trust store. Both the
+package build and `nix flake check` verify that the default bundle excludes
+the `emSign ECC Root CA - G3` root covered by PYSEC-2026-4320. Keep that
+check when updating nixpkgs; the newer `certifi` requirement for pip/uv
+remains unchanged.
+
 ## Test
 
 ```sh
