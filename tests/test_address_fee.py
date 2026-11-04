@@ -114,6 +114,20 @@ def test_registration_answers_an_invoice_and_holds_the_username(client: TestClie
     assert _register(client, name) == {"status": "ERROR", "reason": "already registered"}
 
 
+def test_the_fee_invoice_and_its_hold_expire_in_an_hour(client: TestClient, node: FakeNode, address_fee):
+    resp = _register(client, fresh_username("hour"))
+    payment_hash = _hash(resp["pr"])
+    assert node.expiries[payment_hash] == 3600
+    decoded = bolt11.decode(resp["pr"])
+    assert decoded.expiry == 3600
+    assert notes.address_fee(payment_hash)[3] == decoded.date + 3600
+
+
+def test_a_mint_invoice_keeps_the_backend_default_expiry(client: TestClient, node: FakeNode, mint_note):
+    mint_note(5000)
+    assert node.expiries[sha256(node.last_preimage).hexdigest()] is None
+
+
 def test_paying_the_fee_registers_the_username(client: TestClient, node: FakeNode, address_fee):
     name = fresh_username("paid")
     resp = _register(client, name)

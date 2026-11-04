@@ -222,8 +222,8 @@ each registration, against spam. A valid registration is then answered with
 `{"status": "OK", "pr": <invoice for the fee>}`, and its username is held for
 it: not published, not auto-minting and taken for anybody else until that
 invoice is paid, then registered (a background poll notices the payment, as
-do LUD-21 verify and a lookup of the address); it is released if the invoice
-expires unpaid. The share is accepted at hold time, so it is never registered
+do LUD-21 verify and a lookup of the address); it is released if the invoice,
+which expires after an hour, goes unpaid. The share is accepted at hold time, so it is never registered
 again either way. Pay it from any wallet, or melt a note of exactly the fee
 here: `GET /w/cb?k1=<spend>&pr=<the fee invoice>` then burns the note and
 registers the username in one step, with nothing routed, and burns nothing if

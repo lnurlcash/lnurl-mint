@@ -126,13 +126,15 @@ def ck1_for(key: PrivateKey, domain: str = "testserver") -> str:
     return lnurlcashkernel.encode_ck1(lnurlcashkernel.Spend(0, 0xFFFFFFFF, None, None, (sig,), key=q))
 
 
-def fake_invoice(amount_msat: int, payment_hash: str | None = None) -> str:
+def fake_invoice(amount_msat: int, payment_hash: str | None = None, expiry_secs: int | None = None) -> str:
     """A syntactically-valid (but unpayable) BOLT11 invoice, for faking the
     node without needing a real one."""
     tags = Tags()
     tags.add(TagChar.payment_hash, payment_hash or urandom(32).hex())
     tags.add(TagChar.payment_secret, urandom(32).hex())
     tags.add(TagChar.description, "test")
+    if expiry_secs is not None:
+        tags.add(TagChar.expire_time, expiry_secs)
     return bolt11.encode(
         Bolt11(currency="bc", amount_msat=amount_msat, date=int(time.time()), tags=tags),
         private_key=urandom(32).hex(),
@@ -145,6 +147,7 @@ class FakeNode:
         self.last_preimage: bytes = b""
         self.preimages: dict[str, bytes] = {}  # payment_hash -> preimage, for invoice_preimage
         self.description_hashes: dict[str, str | None] = {}  # payment_hash -> description_for_hash
+        self.expiries: dict[str, int | None] = {}  # payment_hash -> expiry_secs
         self.melt_preimages: dict[str, bytes] = {}  # payment_hash -> preimage, for payment_preimage (LUD-25 verify)
         self.paid: list[str] = []
         self.fail_payments = False
@@ -188,7 +191,12 @@ class FakeNode:
         return self.identity_key.public_key.format(compressed=True).hex()
 
     async def create_invoice(
-        self, amount_msat: int, config, memo: str = "", description_for_hash: str | None = None
+        self,
+        amount_msat: int,
+        config,
+        memo: str = "",
+        description_for_hash: str | None = None,
+        expiry_secs: int | None = None,
     ) -> tuple[str, bytes]:
         preimage = urandom(32)
         self.last_preimage = preimage
@@ -196,7 +204,9 @@ class FakeNode:
         self.preimages[payment_hash] = preimage
         # what a zap invoice was bound to, for the tests to check
         self.description_hashes[payment_hash] = description_for_hash
-        return fake_invoice(amount_msat, payment_hash), preimage
+        # what an invoice was asked to expire after, for the tests to check
+        self.expiries[payment_hash] = expiry_secs
+        return fake_invoice(amount_msat, payment_hash, expiry_secs), preimage
 
     async def is_invoice_settled(self, payment_hash: str, config) -> bool:
         return payment_hash in self.settled

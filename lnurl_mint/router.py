@@ -777,6 +777,14 @@ async def register_username(req: Request, username: str) -> RegisterUsernameResp
     return await _hold_for_address_fee(req, username, share, nostr_pubkey_hex, fee_msat)
 
 
+# how long an address fee invoice - and so the hold on its username - lasts:
+# a registering WALLET pays at once or not at all, and a held name is
+# taken for everyone else meanwhile, so it should not be squattable for
+# the backend's default day or week. Matches the settlement poll's window,
+# so every hold is polled for its whole life.
+_ADDRESS_FEE_EXPIRY_SECONDS = 60 * 60
+
+
 async def _hold_for_address_fee(
     req: Request, username: str, share: bytes, nostr_pubkey_hex: str | None, fee_msat: int
 ) -> RegisterUsernameResponse:
@@ -792,7 +800,9 @@ async def _hold_for_address_fee(
     funding_source = _funding_source()
     _, host = settings.public_base_url_and_host(str(req.base_url))
     try:
-        pr, preimage = await create_invoice(fee_msat, funding_source, memo=f"Register {username}@{host}")
+        pr, preimage = await create_invoice(
+            fee_msat, funding_source, memo=f"Register {username}@{host}", expiry_secs=_ADDRESS_FEE_EXPIRY_SECONDS
+        )
         decoded = bolt11.decode(pr)
     except Exception as exc:
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, log_internal_error("Error creating invoice", exc))
