@@ -1,5 +1,7 @@
 import logging
 
+import pytest
+
 import lnurl_mint.errors as errors_module
 
 
@@ -13,7 +15,7 @@ def test_log_internal_error_does_not_crash_when_error_log_is_unwritable(monkeypa
     broken_logger = logging.getLogger("lnurl_mint.errors.test_unwritable")
     broken_logger.setLevel(logging.ERROR)
     broken_logger.propagate = False
-    broken_logger.addHandler(logging.FileHandler(str(unwritable_dir / "error.log"), delay=True))
+    broken_logger.addHandler(errors_module._ErrorFileHandler(str(unwritable_dir / "error.log"), delay=True))
     monkeypatch.setattr(errors_module, "_logger", broken_logger)
 
     reference = errors_module.log_internal_error("boom", ValueError("something broke"))
@@ -21,7 +23,10 @@ def test_log_internal_error_does_not_crash_when_error_log_is_unwritable(monkeypa
     assert "reference:" in reference
 
 
-def test_log_internal_error_falls_back_to_stdout_when_error_log_is_unwritable(monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize("raise_exceptions", [True, False])
+def test_log_internal_error_falls_back_to_stdout_when_error_log_is_unwritable(
+    monkeypatch, tmp_path, caplog, raise_exceptions
+):
     # regression: _logger has propagate=False specifically so a successful
     # error.log write never *also* shows up in stdout/docker logs - but
     # that meant a failed write vanished with no trace anywhere, not even a
@@ -32,8 +37,9 @@ def test_log_internal_error_falls_back_to_stdout_when_error_log_is_unwritable(mo
     broken_logger = logging.getLogger("lnurl_mint.errors.test_fallback")
     broken_logger.setLevel(logging.ERROR)
     broken_logger.propagate = False
-    broken_logger.addHandler(logging.FileHandler(str(unwritable_dir / "error.log"), delay=True))
+    broken_logger.addHandler(errors_module._ErrorFileHandler(str(unwritable_dir / "error.log"), delay=True))
     monkeypatch.setattr(errors_module, "_logger", broken_logger)
+    monkeypatch.setattr(logging, "raiseExceptions", raise_exceptions)
 
     with caplog.at_level(logging.ERROR):
         reference = errors_module.log_internal_error("boom", ValueError("something broke"))
@@ -47,7 +53,7 @@ def test_log_internal_error_still_logs_normally_when_writable(tmp_path, monkeypa
     logger.setLevel(logging.ERROR)
     logger.propagate = False
     log_path = tmp_path / "error.log"
-    logger.addHandler(logging.FileHandler(str(log_path), delay=True))
+    logger.addHandler(errors_module._ErrorFileHandler(str(log_path), delay=True))
     monkeypatch.setattr(errors_module, "_logger", logger)
 
     reference = errors_module.log_internal_error("boom", ValueError("something broke"))
