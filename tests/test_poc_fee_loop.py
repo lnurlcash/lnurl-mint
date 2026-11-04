@@ -1,8 +1,8 @@
 """Regression tests for the fee/bounds config validation (2026-08-17 review,
 F-4 - originally PoC B2).
 
-Pre-fix, config.py put no upper bound on fee_percent_ppm (plain `int = 0`)
-and nothing validated the bounds surface at startup: FEE_PERCENT_PPM >=
+Pre-fix, config.py put no upper bound on fee_ppm (plain `int = 0`)
+and nothing validated the bounds surface at startup: FEE_PPM >=
 1_000_000 made _min_sendable_msat's walk non-terminating (fee >= amount at
 every step, so the net can never clear min_mint_msat) - a single env var
 turned every GET /p and LUD-16 alias into a permanent 100%-CPU hang (proven
@@ -29,24 +29,24 @@ from lnurl_mint.config import Settings, settings
 from lnurl_mint.router import _min_sendable_msat
 
 
-def test_fee_percent_ppm_at_or_above_100_percent_rejected_at_startup():
+def test_fee_ppm_at_or_above_100_percent_rejected_at_startup():
     for ppm in (1_000_000, 1_000_001, 2_000_000):
         with pytest.raises(ValidationError):
-            Settings(fee_percent_ppm=ppm)
+            Settings(fee_ppm=ppm)
 
 
-def test_fee_percent_ppm_above_the_practical_bound_is_also_rejected():
+def test_fee_ppm_above_the_practical_bound_is_also_rejected():
     # even 999_999 ppm is legal-terminating in theory but costs ~10M loop
     # iterations of CPU per lnaddress request - the bound sits at 100_000
     # (10%), keeping the _min_sendable_msat walk under ~100 steps
     with pytest.raises(ValidationError):
-        Settings(fee_percent_ppm=100_001)
-    assert Settings(fee_percent_ppm=100_000).fee_percent_ppm == 100_000
+        Settings(fee_ppm=100_001)
+    assert Settings(fee_ppm=100_000).fee_ppm == 100_000
 
 
 def test_negative_fee_values_rejected_at_startup():
     with pytest.raises(ValidationError):
-        Settings(fee_percent_ppm=-1)
+        Settings(fee_ppm=-1)
     with pytest.raises(ValidationError):
         Settings(base_fee_msat=-1)
 
@@ -72,13 +72,13 @@ def test_min_sendable_walk_terminates_under_worst_legal_config(monkeypatch):
     bound (100_000), a large base fee, and a min_mint far above
     min_sendable - the walk climbs far, but must terminate quickly (well
     under the defensive cap)."""
-    monkeypatch.setattr(settings, "fee_percent_ppm", 100_000)
+    monkeypatch.setattr(settings, "fee_ppm", 100_000)
     monkeypatch.setattr(settings, "base_fee_msat", 1_000_000)
     monkeypatch.setattr(settings, "min_mint_msat", 1_000_000)
     monkeypatch.setattr(settings, "min_sendable_msat", 10_000)
     value = _min_sendable_msat()
     # net of fee at the result clears min_mint, by construction
-    fee = settings.base_fee_msat + (value * settings.fee_percent_ppm) // 1_000_000
+    fee = settings.base_fee_msat + (value * settings.fee_ppm) // 1_000_000
     fee = -(-fee // 1000) * 1000
     assert value - fee >= settings.min_mint_msat
 
@@ -89,7 +89,7 @@ def test_iteration_cap_turns_a_pathological_config_into_a_loud_error(monkeypatch
     ever again make the walk non-terminating, the cap must convert the
     silent 100%-CPU hang into a raised error - proven here by the walk
     RAISING (quickly) rather than a thread still spinning 2s later."""
-    monkeypatch.setattr(settings, "fee_percent_ppm", 1_000_000)  # bypasses validation, as pre-fix configs could
+    monkeypatch.setattr(settings, "fee_ppm", 1_000_000)  # bypasses validation, as pre-fix configs could
     monkeypatch.setattr(settings, "base_fee_msat", 0)
     monkeypatch.setattr(settings, "min_mint_msat", 10_000)
     monkeypatch.setattr(settings, "min_sendable_msat", 10_000)

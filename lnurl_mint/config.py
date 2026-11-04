@@ -3,7 +3,7 @@ from datetime import date
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .node import LightningBackendConfig
@@ -77,18 +77,29 @@ class Settings(BaseSettings):
     max_sendable_msat: int = Field(default=1_000_000_000, ge=1)
 
     # LUD-25's optional mint fee: withheld from every minted note's value
-    # (a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
-    # amount paid), meant to cover the routing cost of eventually paying
-    # the note back out on melt. Advertised in /p/cb's payRequest metadata
-    # (see router.get_lnaddress) so a wallet can warn the payer up front -
+    # (a flat base_fee_msat plus fee_ppm parts-per-million of the amount
+    # paid), meant to cover the routing cost of eventually paying the note
+    # back out on melt. Advertised in /p/cb's payRequest metadata (see
+    # router.get_lnaddress) so a wallet can warn the payer up front -
     # omitted from metadata entirely (assumed fee-free per spec) when both
-    # are zero. fee_percent_ppm is bounded well below 1_000_000 (100%): at
+    # are zero. fee_ppm is bounded well below 1_000_000 (100%): at
     # or above that the fee can never leave a positive net amount, which
     # sends router._min_sendable_msat's walk into a non-terminating loop -
     # and even merely close to it, each lnaddress request burns millions of loop
     # iterations of CPU. 100_000 (10%) keeps the walk under ~100 steps.
     base_fee_msat: int = Field(default=1000, ge=0)
-    fee_percent_ppm: int = Field(default=0, ge=0, le=100_000)
+    # FEE_PERCENT_PPM is this setting's old name, still read if FEE_PPM is
+    # unset, so a config from before the rename never silently drops its fee
+    fee_ppm: int = Field(default=0, ge=0, le=100_000, validation_alias=AliasChoices("fee_ppm", "fee_percent_ppm"))
+
+    # LUD-26's address fee: what registering a username costs, in msat,
+    # against spam. A registration is then answered with an invoice for it
+    # and its username held until that invoice is paid - from any wallet,
+    # or by melting a note of exactly the fee here - and released if it
+    # expires unpaid. Advertised as the third `Mint fees` value on the
+    # mint's own payRequest (mint@<domain>). 0, the default, is free;
+    # nothing is charged while username_registration_enabled is off.
+    address_fee_msat: int = Field(default=0, ge=0)
 
     # floor on a note's value net of the mint fee (not on `amount` itself,
     # which min_sendable_msat already bounds) - guards against minting
@@ -251,6 +262,23 @@ class Settings(BaseSettings):
             if len(secret) != 64 or any(c not in "0123456789abcdefABCDEF" for c in secret):
                 raise ValueError("NOSTR_KEY must be 32 bytes of hex.")
         return value
+
+    def address_fee(self) -> int:
+        """The address fee a registration is charged (LUD-26): none while
+        registration is disabled."""
+        return self.address_fee_msat if self.username_registration_enabled else 0
+
+    def mint_fees_entry(self, with_address_fee: bool) -> str | None:
+        """LUD-25's `Mint fees: <base_fee_msat>,<fee_ppm>`, with LUD-26's
+        address fee as a third value where `with_address_fee` (the mint's
+        own payRequest). None when there is nothing to announce - a SERVICE
+        that omits it is assumed fee-free per spec."""
+        address_fee = self.address_fee() if with_address_fee else 0
+        if address_fee:
+            return f"Mint fees: {self.base_fee_msat},{self.fee_ppm},{address_fee}"
+        if self.base_fee_msat or self.fee_ppm:
+            return f"Mint fees: {self.base_fee_msat},{self.fee_ppm}"
+        return None
 
     def nostr_pubkey(self) -> str | None:
         from .nostr import pubkey_of

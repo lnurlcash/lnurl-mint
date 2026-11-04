@@ -23,7 +23,7 @@
   getinfo (GET /w, signing.py) is deliberately still live/uncached, and
   /verify's settlement polling is unrelated to node info entirely - both
   remain exactly 1:1 with requests, unchanged.
-- P6/F-4: fee_percent_ppm beyond the validated bound can no longer reach
+- P6/F-4: fee_ppm beyond the validated bound can no longer reach
   _min_sendable_msat through Settings at all, and the function's own
   iteration cap converts even a post-construction mutation into a raised
   error instead of a hang.
@@ -172,7 +172,7 @@ def test_p6_pathological_ppm_raises_instead_of_hanging(monkeypatch):
     # defense: a config that used to spin a worker at 100% CPU forever now
     # raises, quickly and loudly
     monkeypatch.setattr(settings, "base_fee_msat", 0)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 1_000_000)
+    monkeypatch.setattr(settings, "fee_ppm", 1_000_000)
     monkeypatch.setattr(settings, "min_mint_msat", 10_000)
     monkeypatch.setattr(settings, "min_sendable_msat", 10_000)
 
@@ -191,5 +191,5 @@ def test_p6_pathological_ppm_raises_instead_of_hanging(monkeypatch):
     assert "error" in result
 
     # and a high-but-legal ppm (at the validated bound) still terminates
-    monkeypatch.setattr(settings, "fee_percent_ppm", 100_000)
+    monkeypatch.setattr(settings, "fee_ppm", 100_000)
     assert _min_sendable_msat() > 0

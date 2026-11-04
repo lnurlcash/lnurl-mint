@@ -296,6 +296,7 @@ async def _create_invoice_spark(
     config: LightningBackendConfig,
     memo: str = "lnurlcash mint",
     description_for_hash: str | None = None,
+    expiry_secs: int | None = None,
 ) -> tuple[str, None]:
     # the SSP's bolt11 surface is sat-denominated - see the module
     # docstring for why fractional-sat amounts are rejected rather than
@@ -313,7 +314,7 @@ async def _create_invoice_spark(
             payment_method=ReceivePaymentMethod.BOLT11_INVOICE(
                 description=memo,
                 amount_sats=amount_msat // 1000,
-                expiry_secs=None,
+                expiry_secs=expiry_secs,
                 payment_hash=None,
                 receiver_identity_public_key=None,
             )

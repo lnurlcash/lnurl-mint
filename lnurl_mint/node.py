@@ -124,6 +124,7 @@ async def create_invoice(
     config: LightningBackendConfig,
     memo: str = "lnurlcash mint",
     description_for_hash: str | None = None,
+    expiry_secs: int | None = None,
 ) -> tuple[str, bytes | None]:
     """The preimage half of the result is None for the spark backend -
     its SSP generates and holds the preimage itself (see spark.py's
@@ -135,14 +136,17 @@ async def create_invoice(
     `description_for_hash` commits the invoice to a text it does not
     carry: the invoice gets `h` = sha256(text) in place of `d`, which is
     how a NIP-57 zap invoice binds to its zap request. lnd and cln both
-    do it; spark cannot (see _create_invoice_spark)."""
+    do it; spark cannot (see _create_invoice_spark).
+
+    `expiry_secs` sets how long the invoice stays payable; None leaves
+    the backend's own default (lnd's 24h, cln's 7 days, spark's 24h)."""
     return await _dispatch(
         "create_invoice",
         config,
         _create_invoice_lnd,
         _create_invoice_cln,
         amount_msat,
-        trailing=(memo, description_for_hash),
+        trailing=(memo, description_for_hash, expiry_secs),
     )
 
 
@@ -242,6 +246,7 @@ async def _create_invoice_lnd(
     config: LightningBackendConfig,
     memo: str,
     description_for_hash: str | None = None,
+    expiry_secs: int | None = None,
 ) -> tuple[str, bytes]:
     # lnd's AddInvoice never returns the preimage - it lets the caller supply
     # one instead (r_preimage), so generate it ourselves and use that: the
@@ -254,6 +259,8 @@ async def _create_invoice_lnd(
     else:
         # lnd takes the hash itself; a memo alongside would be dropped
         body["description_hash"] = b64encode(sha256(description_for_hash.encode()).digest()).decode()
+    if expiry_secs is not None:
+        body["expiry"] = str(expiry_secs)
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.post(f"{url}/v1/invoices", headers={"Grpc-Metadata-macaroon": macaroon}, json=body)
         await _raise_for_status(res)
@@ -404,6 +411,7 @@ async def _create_invoice_cln(
     config: LightningBackendConfig,
     memo: str,
     description_for_hash: str | None = None,
+    expiry_secs: int | None = None,
 ) -> tuple[str, bytes]:
     # cln's `invoice` accepts a caller-supplied preimage too - same reasoning
     # as lnd above, generate it ourselves so we always know it for certain
@@ -417,6 +425,8 @@ async def _create_invoice_cln(
     if description_for_hash is not None:
         # cln hashes the description it is given and puts only the hash on the invoice
         body["deschashonly"] = True
+    if expiry_secs is not None:
+        body["expiry"] = expiry_secs
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.post(f"{url}/v1/invoice", headers={"Rune": rune}, json=body)
         await _raise_for_status(res)

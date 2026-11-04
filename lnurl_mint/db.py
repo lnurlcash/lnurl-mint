@@ -174,6 +174,23 @@ class NoteStore:
                 " SELECT CASE WHEN length(cx1) = 128 THEN substr(cx1, 1, 64) ELSE substr(cx1, 67, 64) END"
                 " FROM usernames"
             )
+            # LUD-26's address fee: a registration held until its fee
+            # invoice is paid (settle_address_fee), or released once it
+            # expires unpaid. Only the payment hash and the invoice itself
+            # are stored, never its preimage, same as `mints`.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS address_fees ("
+                " payment_hash TEXT PRIMARY KEY,"
+                " pr TEXT NOT NULL,"
+                " username TEXT NOT NULL,"
+                " cx1 TEXT NOT NULL,"
+                " nostr_pubkey TEXT,"
+                " amount_msat INTEGER NOT NULL,"
+                " created_at INTEGER NOT NULL,"
+                " expires_at INTEGER NOT NULL,"
+                " paid INTEGER NOT NULL DEFAULT 0)"
+            )
+            self._conn.execute("CREATE INDEX IF NOT EXISTS address_fees_username ON address_fees (username)")
             self._conn.commit()
         return self._conn
 
@@ -673,13 +690,164 @@ class NoteStore:
         (see nostr_pubkey/router.get_nip05) - a WALLET-supplied npub,
         decoded, orthogonal to cx1."""
         with self._lock, self.conn:
-            if self.conn.execute("SELECT 1 FROM usernames WHERE username = ?", (username,)).fetchone():
+            if self._username_taken(username):
                 raise ValueError("already registered")
             self._accept_key(xp_hex)
             self.conn.execute(
                 "INSERT INTO usernames (username, cx1, nostr_pubkey, next_index) VALUES (?, ?, ?, 0)",
                 (username, cx1_hex, nostr_pubkey_hex),
             )
+
+    def _username_taken(self, username: str, now: int | None = None) -> bool:
+        """Whether `username` is registered, or held for an address fee
+        whose invoice is unpaid and unexpired (LUD-26). Caller holds the
+        lock."""
+        now = int(time.time()) if now is None else now
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM usernames WHERE username = ?"
+                " UNION SELECT 1 FROM address_fees WHERE username = ? AND paid = 0 AND expires_at > ?",
+                (username, username, now),
+            ).fetchone()
+            is not None
+        )
+
+    def username_taken(self, username: str) -> bool:
+        with self._lock:
+            return self._username_taken(username)
+
+    def hold_username(
+        self,
+        payment_hash: str,
+        pr: str,
+        username: str,
+        cx1_hex: str,
+        xp_hex: str,
+        nostr_pubkey_hex: str | None,
+        amount_msat: int,
+        expires_at: int,
+    ) -> None:
+        """Holds `username` for a registration until its address fee
+        invoice `payment_hash` is paid (settle_address_fee), or releases it
+        once that expires at `expires_at` unpaid (LUD-26). Refuses what
+        register_username refuses, and accepts the share key now, so a
+        captured proof never applies again even if the invoice lapses. The
+        caller has already checked the proof."""
+        with self._lock, self.conn:
+            if self._username_taken(username):
+                raise ValueError("already registered")
+            self._accept_key(xp_hex)
+            self.conn.execute(
+                "INSERT INTO address_fees (payment_hash, pr, username, cx1, nostr_pubkey, amount_msat,"
+                " created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (payment_hash, pr, username, cx1_hex, nostr_pubkey_hex, amount_msat, int(time.time()), expires_at),
+            )
+
+    def address_fee(self, payment_hash: str) -> tuple[str, str, int, int, bool] | None:
+        """(pr, username, amount_msat, expires_at, paid) of the address fee
+        invoice `payment_hash`, paid or not, or None if this mint never
+        issued one under it."""
+        row = self.conn.execute(
+            "SELECT pr, username, amount_msat, expires_at, paid FROM address_fees WHERE payment_hash = ?",
+            (payment_hash,),
+        ).fetchone()
+        return (row[0], row[1], row[2], row[3], bool(row[4])) if row else None
+
+    def held_address_fees(self, created_since: int, limit: int, now: int | None = None) -> list[str]:
+        """Payment hashes of the `limit` newest address fee invoices created
+        at or after `created_since` that are still unpaid and unexpired -
+        what router.settle_polled_mints asks the funding source about. A
+        registration costs nothing until paid, so the poll must not grow
+        with them, same as pending_polled_mints; an older one still settles
+        when its username is looked up (held_address_fee).
+
+        Expired-but-unpaid invoices are included: a payment can settle an
+        HTLC accepted just before expiry, and settle_address_fee never
+        checks the expiry for exactly that reason."""
+        rows = self.conn.execute(
+            "SELECT payment_hash FROM address_fees WHERE paid = 0 AND created_at >= ?"
+            " ORDER BY created_at DESC LIMIT ?",
+            (created_since, limit),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def held_address_fee(self, username: str) -> str | None:
+        """The payment hash of the unpaid address fee `username` is held
+        for, or None if it is not held."""
+        row = self.conn.execute(
+            "SELECT payment_hash FROM address_fees WHERE username = ? AND paid = 0 AND expires_at > ?",
+            (username, int(time.time())),
+        ).fetchone()
+        return row[0] if row else None
+
+    def settle_address_fee(self, payment_hash: str) -> tuple[str, bool] | None:
+        """Registers the username a paid address fee held: (username,
+        registered), or None if the invoice was settled before or is
+        unknown. Never checks the expiry - the payment was claimed while
+        the hold stood - so `registered` is False only if the hold lapsed
+        and somebody else took the username before this settlement was
+        seen: the fee is kept and nothing is registered."""
+        with self._lock, self.conn:
+            return self._settle_address_fee(payment_hash)
+
+    def _settle_address_fee(self, payment_hash: str) -> tuple[str, bool] | None:
+        """settle_address_fee's body. Caller holds the lock and the
+        transaction."""
+        cursor = self.conn.execute(
+            "UPDATE address_fees SET paid = 1 WHERE payment_hash = ? AND paid = 0", (payment_hash,)
+        )
+        if cursor.rowcount != 1:
+            return None
+        username, cx1_hex, nostr_pubkey_hex = self.conn.execute(
+            "SELECT username, cx1, nostr_pubkey FROM address_fees WHERE payment_hash = ?", (payment_hash,)
+        ).fetchone()
+        # its own hold is paid now, so only a registration (or another
+        # hold, once this one lapsed) can stand in the way
+        if self._username_taken(username):
+            return username, False
+        self.conn.execute(
+            "INSERT INTO usernames (username, cx1, nostr_pubkey, next_index) VALUES (?, ?, ?, 0)",
+            (username, cx1_hex, nostr_pubkey_hex),
+        )
+        return username, True
+
+    def pay_address_fee_with_notes(self, burn_ids: list[str], payment_hash: str, total_msat: int) -> str:
+        """Pays the address fee invoice `payment_hash` with notes this mint
+        issued (LUD-26 lets a WALLET melt one into it): burns `burn_ids`,
+        worth `total_msat`, and registers the held username, all in one
+        transaction, nothing routed. The invoice must be unpaid, unexpired
+        and for exactly `total_msat`, and the username still free to
+        register - otherwise ValueError, burning nothing. Raises as swap
+        does for a burn id that is unknown, spent, repeated or pending.
+        Returns the username registered."""
+        with self._lock, self.conn:
+            if (
+                self.conn.execute(
+                    "SELECT 1 FROM address_fees WHERE payment_hash = ? AND paid = 0 AND expires_at > ?"
+                    " AND amount_msat = ?",
+                    (payment_hash, int(time.time()), total_msat),
+                ).fetchone()
+                is None
+            ):
+                raise ValueError("This address fee invoice is no longer payable.")
+            seen: set[str] = set()
+            for note_id in burn_ids:
+                if note_id in seen:
+                    raise ValueError("Invalid or already spent k1.")
+                seen.add(note_id)
+                row = self.conn.execute("SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
+                if row is None:
+                    raise ValueError("Invalid or already spent k1.")
+                if row[0]:
+                    raise PendingNoteError("pending")
+            settled = self._settle_address_fee(payment_hash)
+            if settled is None or not settled[1]:
+                # the hold stood a moment ago: never burn for nothing. The
+                # raise rolls the whole transaction back, `paid` included
+                raise ValueError("already registered")
+            for note_id in burn_ids:
+                self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
+            return settled[0]
 
     def update_username(self, username: str, cx1_hex: str, xp_hex: str) -> None:
         """Moves a registered `username` to a new share without ever freeing

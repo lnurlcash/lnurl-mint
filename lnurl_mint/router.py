@@ -463,13 +463,13 @@ async def _note_by_ref(value: str) -> str | None:
 
 def _mint_fee_msat(amount_msat: int) -> int:
     """The fee withheld from a mint of `amount_msat` (LUD-25's optional mint
-    fee): a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
+    fee): a flat base_fee_msat plus fee_ppm parts-per-million of the
     amount paid, rounded *up* to the nearest whole sat - Lightning fees are
     conventionally sat-denominated, and rounding up (rather than leaving a
     fractional-sat msat remainder) means the mint is never short a sat,
     matching or slightly exceeding the estimate a wallet derives from the
     advertised `Mint fees: ` metadata entry (see get_lnaddress)."""
-    fee_msat = settings.base_fee_msat + (amount_msat * settings.fee_percent_ppm) // 1_000_000
+    fee_msat = settings.base_fee_msat + (amount_msat * settings.fee_ppm) // 1_000_000
     return -(-fee_msat // 1000) * 1000
 
 
@@ -481,7 +481,7 @@ def _min_sendable_msat() -> int:
     settings.min_sendable_msat when it doesn't clear that net floor means
     paying the advertised minimum always bounces, so this walks amount up
     from the higher of the two configured floors until its net clears
-    min_mint_msat too. Bounded defensively: fee_percent_ppm is validated
+    min_mint_msat too. Bounded defensively: fee_ppm is validated
     to stay well below 100% (see config.py), which guarantees the walk
     terminates quickly - the cap turns any future regression of that
     guarantee into a loud error at request time rather than a worker
@@ -491,7 +491,7 @@ def _min_sendable_msat() -> int:
         if amount_msat - _mint_fee_msat(amount_msat) >= settings.min_mint_msat:
             return amount_msat
         amount_msat += 1000
-    raise RuntimeError("minSendable walk did not terminate - check the fee settings (fee_percent_ppm too high?)")
+    raise RuntimeError("minSendable walk did not terminate - check the fee settings (fee_ppm too high?)")
 
 
 def max_mintable_msat() -> int:
@@ -550,6 +550,11 @@ async def settle_polled_mints(now: int | None = None) -> None:
     now = int(time.time()) if now is None else now
     for payment_hash in notes.pending_polled_mints(now - _ZAP_POLL_WINDOW_SECONDS, _ZAP_POLL_LIMIT):
         await _mint_settled(payment_hash)
+    # LUD-26's address fees: a held username is registered once its fee is
+    # paid. Bounded like the zap poll, since a registration is free to
+    # request; an older hold settles when its address is looked up
+    for payment_hash in notes.held_address_fees(now - _ZAP_POLL_WINDOW_SECONDS, _ZAP_POLL_LIMIT):
+        await _address_fee_settled(payment_hash)
 
 
 async def publish_zap_receipts(funding_source: LightningBackendConfig, now: int | None = None) -> int:
@@ -762,11 +767,93 @@ async def register_username(req: Request, username: str) -> RegisterUsernameResp
         nostr_pubkey_hex = decoded_npub.hex()
     if not _proves("register", _domain(req), username, cx1, share[33:], sig):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid ownership signature.")
+    fee_msat = settings.address_fee()
+    if not fee_msat:
+        try:
+            notes.register_username(username, share.hex(), share[33:].hex(), nostr_pubkey_hex)
+        except ValueError as exc:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
+        return RegisterUsernameResponse()
+    return await _hold_for_address_fee(req, username, share, nostr_pubkey_hex, fee_msat)
+
+
+# how long an address fee invoice - and so the hold on its username - lasts:
+# a registering WALLET pays at once or not at all, and a held name is
+# taken for everyone else meanwhile, so it should not be squattable for
+# the backend's default day or week. Matches the settlement poll's window,
+# so every hold is polled for its whole life.
+_ADDRESS_FEE_EXPIRY_SECONDS = 60 * 60
+
+
+async def _hold_for_address_fee(
+    req: Request, username: str, share: bytes, nostr_pubkey_hex: str | None, fee_msat: int
+) -> RegisterUsernameResponse:
+    """LUD-26's address fee: answers a valid registration with an invoice
+    for `fee_msat` and holds `username` for it (NoteStore.hold_username)
+    until it is paid - seen by settle_polled_mints or verify_invoice, or
+    paid by melting a note into it (_melt_into_address_fee) - releasing it
+    if the invoice expires unpaid. Until then the address is not published
+    and nothing auto-mints. A username already taken is refused before an
+    invoice exists for it."""
+    if notes.username_taken(username):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "already registered")
+    funding_source = _funding_source()
+    _, host = settings.public_base_url_and_host(str(req.base_url))
     try:
-        notes.register_username(username, share.hex(), share[33:].hex(), nostr_pubkey_hex)
+        pr, preimage = await create_invoice(
+            fee_msat, funding_source, memo=f"Register {username}@{host}", expiry_secs=_ADDRESS_FEE_EXPIRY_SECONDS
+        )
+        decoded = bolt11.decode(pr)
+    except Exception as exc:
+        raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, log_internal_error("Error creating invoice", exc))
+    # see _pay_callback: the preimage is discarded, only the hash is kept
+    payment_hash = sha256(preimage).hexdigest() if preimage is not None else _created_invoice_payment_hash(pr)
+    try:
+        notes.hold_username(
+            payment_hash,
+            pr,
+            username,
+            share.hex(),
+            share[33:].hex(),
+            nostr_pubkey_hex,
+            fee_msat,
+            decoded.expiry_time,
+        )
     except ValueError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
-    return RegisterUsernameResponse()
+    logging.info("HOLD %s for its address fee, %d msat (%s)", username, fee_msat, payment_hash)
+    return RegisterUsernameResponse(pr=pr)
+
+
+async def _address_fee_settled(payment_hash: str) -> bool:
+    """Whether the address fee invoice `payment_hash` has been paid -
+    checking the funding source live and registering its held username
+    (NoteStore.settle_address_fee) the first time payment is observed. Like
+    _mint_settled, keeps answering True once paid, for LUD-21 verify."""
+    fee = notes.address_fee(payment_hash)
+    if fee is None:
+        return False
+    if fee[4]:
+        return True
+    funding_source = settings.funding_source()
+    if not funding_source.backend:
+        return False
+    if not await is_invoice_settled(payment_hash, funding_source):
+        return False
+    settled = notes.settle_address_fee(payment_hash)
+    if settled is not None:
+        username, registered = settled
+        if registered:
+            logging.info("REGISTER %s (address fee %d msat, %s)", username, fee[2], payment_hash)
+        else:
+            logging.warning(
+                "address fee %s for %s settled after its hold lapsed and the username was taken:"
+                " %d msat kept, nothing registered",
+                payment_hash,
+                username,
+                fee[2],
+            )
+    return True
 
 
 @router.put(
@@ -862,7 +949,7 @@ def get_nip05(name: str | None = None) -> Nip05Response:
 
 
 @router.get("/.well-known/lnurlp/{username}", tags=["lnurlcash"], response_model=LnurlPayResponse | LnurlErrorResponse)
-def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
+async def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     """LUD-16 Lightning Address payRequest that mints lnurlcash bearer
     notes: `withdrawLink` points at the withdrawRequest endpoint
     (get_withdraw) that will recognize this mint's payment preimages -
@@ -888,6 +975,12 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     is the same address (see _address_name)."""
     username = _address_name(username)
     registered = _known_username(username) or _registered_username_branch(username) is not None
+    if not registered and settings.username_registration_enabled:
+        # held for an address fee (LUD-26): published once it is paid, so
+        # a lookup is also what notices a payment the poll no longer asks about
+        held = notes.held_address_fee(username)
+        registered = held is not None and await _address_fee_settled(held)
+        registered = registered and _registered_username_branch(username) is not None
     if not registered:
         raise HTTPException(HTTPStatus.NOT_FOUND, "unknown user")
     base, host = settings.public_base_url_and_host(str(req.base_url))
@@ -899,10 +992,13 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
         # names should see that same identity confirmed here
         ["text/identifier", f"{username}@{host}"],
     ]
-    if settings.base_fee_msat or settings.fee_percent_ppm:
-        # a SERVICE that omits this entry is assumed fee-free per spec, so
-        # it's only added when there's actually a fee to disclose
-        metadata_entries.append(["text/plain", f"Mint fees: {settings.base_fee_msat},{settings.fee_percent_ppm}"])
+    # a SERVICE that omits this entry is assumed fee-free per spec, so it's
+    # only added when there's actually a fee to disclose. The mint's own
+    # payRequest (mint@<domain>, where LUD-26 has a WALLET look) also
+    # carries the address fee as a third value
+    fees_entry = settings.mint_fees_entry(with_address_fee=_known_username(username))
+    if fees_entry is not None:
+        metadata_entries.append(["text/plain", fees_entry])
     metadata = json.dumps(metadata_entries)
     # a registered (non-fixed-identity) username's callback is its own
     # path, /p/{username} (get_pay_callback_for_username), rather than a
@@ -1271,6 +1367,10 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
         if not notes.mint_uses_comment(payment_hash):
             raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
         return await _verify_response(payment_hash, pr, _mint_settled, _mint_preimage)
+    fee = notes.address_fee(payment_hash)
+    if fee is not None:
+        # an address fee's preimage is mere proof of payment: it redeems nothing
+        return await _verify_response(payment_hash, fee[0], _address_fee_settled, _mint_preimage)
     pr = notes.melt_pr(payment_hash)
     if pr is not None:
         return await _verify_response(payment_hash, pr, _melt_settled, _melt_preimage)
@@ -1380,6 +1480,33 @@ async def get_withdraw(
         mintPubkey=await mint_pubkey(settings.funding_source()),
         c=sig,
     )
+
+
+def _melt_into_address_fee(
+    req: Request, note_ids: list[str], pr: str, payment_hash: str, fee_pr: str, total_msat: int
+) -> WithdrawSuccessResponse:
+    """A melt into this mint's own address fee invoice: the notes are burned
+    and the held username registered in one transaction
+    (NoteStore.pay_address_fee_with_notes), with nothing to route - so,
+    unlike a melt paid out over Lightning, the outcome is certain before
+    anything burns. One no longer payable (paid, expired, or its username
+    taken meanwhile) is refused, burning nothing. Its answer is a melt's,
+    `verify` included."""
+    if pr.strip().lower() != fee_pr.lower():
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Cannot melt into an invoice this mint issued itself.")
+    try:
+        username = notes.pay_address_fee_with_notes(note_ids, payment_hash, total_msat)
+    except PendingNoteError:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
+    logging.info(
+        "REGISTER %s (address fee %d msat paid with %d note(s), %s)", username, total_msat, len(note_ids), payment_hash
+    )
+    if settings.verify_enabled:
+        base = settings.public_base_url(str(req.base_url))
+        return WithdrawSuccessResponse(pr=pr, verify=f"{base}/verify/{payment_hash}")
+    return WithdrawSuccessResponse()
 
 
 @router.get("/w/cb", tags=["lnurlcash"], response_model=WithdrawSuccessResponse | LnurlErrorResponse)
@@ -1504,6 +1631,12 @@ async def get_withdraw_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, f"Invalid invoice: {exc!s}")
         if decoded.amount_msat != total_msat:
             raise HTTPException(HTTPStatus.BAD_REQUEST, f"Invoice must be for exactly {total_msat} msat.")
+        # this mint's own address fee invoice (LUD-26 lets a WALLET melt a
+        # note it holds into it): settled right here, nothing is routed
+        if decoded.has_payment_hash:
+            fee = notes.address_fee(decoded.payment_hash)
+            if fee is not None:
+                return _melt_into_address_fee(req, note_ids, pr, decoded.payment_hash, fee[0], total_msat)
         # `pr` is itself an invoice this same mint issued via /p/cb (pending
         # or already settled/minted) - reject outright rather than paying
         # it. Paying it over Lightning would just be the funding source
@@ -1579,7 +1712,7 @@ async def get_withdraw_callback(
         if amount is not None:
             if not 0 < amount < total_msat:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, f"amount must be between 0 and {total_msat} msat.")
-            # per LUD-25, base_fee_msat (never fee_percent_ppm - that's
+            # per LUD-25, base_fee_msat (never fee_ppm - that's
             # already been withheld once, at mint time) comes out of
             # change, not the requested amount, so a holder can't dodge it
             # by splitting into many dust notes and melting each

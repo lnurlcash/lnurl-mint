@@ -153,7 +153,7 @@ def ledger(client: TestClient, node: FakeNode) -> Ledger:
 @pytest.fixture
 def fee_settings(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 0)
+    monkeypatch.setattr(settings, "fee_ppm", 0)
     monkeypatch.setattr(settings, "min_mint_msat", 0)
     monkeypatch.setattr(settings, "min_sendable_msat", 1000)
 
@@ -261,7 +261,7 @@ def test_fee_arithmetic_grid_never_attacker_favorable(client: TestClient, node: 
     for base_fee in (0, 1, 500, 1000, 1500, 10_000):
         for ppm in (0, 1, 1000, 500_000, 999_999):
             monkeypatch.setattr(settings, "base_fee_msat", base_fee)
-            monkeypatch.setattr(settings, "fee_percent_ppm", ppm)
+            monkeypatch.setattr(settings, "fee_ppm", ppm)
             for gross in (1000, 10_000, 999_999, 1_000_000, 1_500_000, 100_000_000):
                 fee = _mint_fee_msat(gross)
                 # fee always >= the unrounded formula, and always >= base_fee
@@ -279,7 +279,7 @@ def test_zero_value_mint_edge_no_gain(ledger: Ledger, monkeypatch):
     each zero-note already paid in full at mint time)."""
     # variant 1: ppm=1e6, bf=0 - fee == gross exactly at multiples of 1000
     monkeypatch.setattr(settings, "base_fee_msat", 0)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 1_000_000)
+    monkeypatch.setattr(settings, "fee_ppm", 1_000_000)
     monkeypatch.setattr(settings, "min_mint_msat", 0)
     monkeypatch.setattr(settings, "min_sendable_msat", 1000)
     z1 = ledger.mint(1000)
@@ -291,7 +291,7 @@ def test_zero_value_mint_edge_no_gain(ledger: Ledger, monkeypatch):
 
     # variant 2: bf=1000, ppm=0 - zero-note that 'paid' a full base fee
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 0)
+    monkeypatch.setattr(settings, "fee_ppm", 0)
     z1 = ledger.mint(1000)
     z2 = ledger.mint(1000)
     assert notes.note_amount(_note_id(z1)) == 0
@@ -306,7 +306,7 @@ def test_sub_sat_base_fee_rounding_is_mint_favorable(ledger: Ledger, monkeypatch
     splits collect and merges refund the raw 1 msat - the rounding gap is
     always kept by the mint, never by the holder."""
     monkeypatch.setattr(settings, "base_fee_msat", 1)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 0)
+    monkeypatch.setattr(settings, "fee_ppm", 0)
     monkeypatch.setattr(settings, "min_mint_msat", 0)
     monkeypatch.setattr(settings, "min_sendable_msat", 1000)
     k1 = ledger.mint(100_000)
@@ -386,7 +386,7 @@ def test_operator_fee_raise_overrefunds(ledger: Ledger, monkeypatch):
     Attacker cannot trigger this; it's an operator footgun worth a doc
     line, not a vulnerability."""
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
-    monkeypatch.setattr(settings, "fee_percent_ppm", 0)
+    monkeypatch.setattr(settings, "fee_ppm", 0)
     monkeypatch.setattr(settings, "min_mint_msat", 0)
     monkeypatch.setattr(settings, "min_sendable_msat", 1000)
     k1s = [ledger.mint(100_000) for _ in range(3)]
