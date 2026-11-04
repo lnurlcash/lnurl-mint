@@ -155,6 +155,25 @@ class NoteStore:
             # supplied one - both mean "not a NIP-05 name", same as any
             # other unregistered name (see router.get_nip05)
             self._add_column_if_missing(self._conn, "usernames", "nostr_pubkey", "TEXT")
+            # LUD-26: a registered Lightning Address's mint names no note
+            # until it settles - the share's next unused one is picked then
+            # (see settle_mint), so an unpaid invoice leaves no unused index
+            # behind. NULL for every other mint.
+            self._add_column_if_missing(self._conn, "mints", "username", "TEXT")
+            # the username an internal transfer credited (transfer_to_username),
+            # which picked the burn's output itself, so its retry is
+            # recognised; NULL for every rotate/split/merge
+            self._add_column_if_missing(self._conn, "burns", "to_username", "TEXT")
+            # every share key this mint ever accepted (LUD-26): none is
+            # registered twice, so a captured proof never applies again. A
+            # cx1 on file is hex(x(P) || chain_code) from before LUD-26 (64
+            # bytes) or hex(chain_code || P) (65), so either is backfilled.
+            self._conn.execute("CREATE TABLE IF NOT EXISTS accepted_keys (xp TEXT PRIMARY KEY)")
+            self._conn.execute(
+                "INSERT OR IGNORE INTO accepted_keys (xp)"
+                " SELECT CASE WHEN length(cx1) = 128 THEN substr(cx1, 1, 64) ELSE substr(cx1, 67, 64) END"
+                " FROM usernames"
+            )
             self._conn.commit()
         return self._conn
 
@@ -181,8 +200,9 @@ class NoteStore:
         payment_hash: str,
         pr: str,
         amount_msat: int,
-        note_id: str,
+        note_id: str | None,
         zap_request: str | None = None,
+        username: str | None = None,
     ) -> None:
         """Record an invoice that becomes a note worth `amount_msat` once it
         settles (see settle_mint). Only the payment hash and the invoice
@@ -197,14 +217,20 @@ class NoteStore:
 
         `zap_request` is the NIP-57 kind 9734 the invoice was bound to,
         verbatim, for the receipt published once it settles (see
-        unpublished_zaps)."""
+        unpublished_zaps).
+
+        A registered Lightning Address's mint passes `username` and no
+        `note_id`: its note is the share's next unused one, picked when the
+        invoice settles (settle_mint), never now (LUD-26's Crediting)."""
+        if (note_id is None) == (username is None):
+            raise ValueError("a mint credits either a named note or a username's share")
         with self._lock, self.conn:
-            if self._id_in_use(note_id):
+            if note_id is not None and self._id_in_use(note_id):
                 raise ValueError("already in use")
             self.conn.execute(
-                "INSERT INTO mints (payment_hash, pr, amount_msat, note_id, zap_request, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (payment_hash, pr, amount_msat, note_id, zap_request, int(time.time())),
+                "INSERT INTO mints (payment_hash, pr, amount_msat, note_id, zap_request, created_at, username)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (payment_hash, pr, amount_msat, note_id, zap_request, int(time.time()), username),
             )
 
     def _id_in_use(self, note_id: str) -> bool:
@@ -223,12 +249,15 @@ class NoteStore:
         with self._lock:
             return self._id_in_use(note_id)
 
-    def pending_zap_mints(self, created_since: int, limit: int) -> list[str]:
-        """Payment hashes of the `limit` newest unpaid zap invoices created
-        at or after `created_since` (unix seconds) - what the settlement
-        poll checks. Older ones are left alone."""
+    def pending_polled_mints(self, created_since: int, limit: int) -> list[str]:
+        """Payment hashes of the `limit` newest unpaid invoices created at or
+        after `created_since` (unix seconds) that only a settlement poll can
+        settle: a zap's, whose client waits on the receipt, and a registered
+        Lightning Address's, whose note no lookup can name until it settles
+        (see settle_mint). Older ones are left alone."""
         rows = self.conn.execute(
-            "SELECT payment_hash FROM mints WHERE minted = 0 AND zap_request IS NOT NULL AND created_at >= ?"
+            "SELECT payment_hash FROM mints WHERE minted = 0"
+            " AND (zap_request IS NOT NULL OR username IS NOT NULL) AND created_at >= ?"
             " ORDER BY created_at DESC LIMIT ?",
             (created_since, limit),
         ).fetchall()
@@ -277,8 +306,12 @@ class NoteStore:
         entire bearer secret and verify would hand it to anyone holding the
         verify URL, not just the payer. Once a comment was used, the
         preimage redeems nothing, so verify is unconditionally safe there."""
-        row = self.conn.execute("SELECT note_id FROM mints WHERE payment_hash = ?", (payment_hash,)).fetchone()
-        return bool(row and row[0] is not None)
+        row = self.conn.execute(
+            "SELECT note_id, username FROM mints WHERE payment_hash = ?", (payment_hash,)
+        ).fetchone()
+        # an address mint's preimage redeems nothing either: its note is a
+        # key only the share's holder can spend
+        return bool(row and (row[0] is not None or row[1] is not None))
 
     def mint_pr(self, payment_hash: str) -> str | None:
         """The invoice `payment_hash` was minted from (LUD-21 verify's `pr`
@@ -296,23 +329,30 @@ class NoteStore:
         row = self.conn.execute("SELECT minted FROM mints WHERE payment_hash = ?", (payment_hash,)).fetchone()
         return bool(row and row[0])
 
-    def settle_mint(self, payment_hash: str) -> int | None:
+    def settle_mint(self, payment_hash: str, derive: "DeriveNote | None" = None) -> int | None:
         """Turn a settled mint invoice into an outstanding note, under the
-        note_id create_mint recorded (already checked not to collide).
-        Returns its value, or None if a concurrent request already minted it
-        (in which case the note already exists and note_amount finds it), or
-        if the mint names no note at all."""
+        note_id create_mint recorded (already checked not to collide), or
+        for a registered Lightning Address's mint under the share's next
+        unused note, picked now with `derive` (see _claim_index). Returns its
+        value, or None if a concurrent request already minted it (in which
+        case the note already exists and note_amount finds it), or if the
+        mint names no note at all."""
         with self._lock, self.conn:
             cursor = self.conn.execute(
-                "UPDATE mints SET minted = 1 WHERE payment_hash = ? AND minted = 0 AND note_id IS NOT NULL",
+                "UPDATE mints SET minted = 1 WHERE payment_hash = ? AND minted = 0"
+                " AND (note_id IS NOT NULL OR username IS NOT NULL)",
                 (payment_hash,),
             )
             if cursor.rowcount != 1:
                 return None
-            row = self.conn.execute(
-                "SELECT amount_msat, note_id FROM mints WHERE payment_hash = ?", (payment_hash,)
+            amount_msat, note_id, username = self.conn.execute(
+                "SELECT amount_msat, note_id, username FROM mints WHERE payment_hash = ?", (payment_hash,)
             ).fetchone()
-            amount_msat, note_id = row
+            if note_id is None:
+                if derive is None:
+                    raise ValueError("settling an address mint needs the share's derivation")
+                note_id, _ = self._claim_index(username, derive)
+                self.conn.execute("UPDATE mints SET note_id = ? WHERE payment_hash = ?", (note_id, payment_hash))
             self.conn.execute(
                 "INSERT INTO notes (id, amount_msat, locked_at) VALUES (?, ?, ?)",
                 (note_id, amount_msat, int(time.time())),
@@ -409,57 +449,79 @@ class NoteStore:
         with self._lock:
             try:
                 with self.conn:
-                    seen_burn_ids: set[str] = set()
-                    for note_id in burn_ids:
-                        if note_id in seen_burn_ids:
-                            raise ValueError("Invalid or already spent k1.")
-                        seen_burn_ids.add(note_id)
-                        row = self.conn.execute(
-                            "SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)
-                        ).fetchone()
-                        if row is None:
-                            raise ValueError("Invalid or already spent k1.")
-                        if row[0]:
-                            raise PendingNoteError("pending")
-
-                    seen_mint_ids: set[str] = set()
-                    for note_id in mint_note_ids:
-                        if self.conn.execute(
-                            "SELECT 1 FROM mints WHERE note_id = ?",
-                            (note_id,),
-                        ).fetchone():
-                            # the note some mint invoice will credit: as taken
-                            # as one already on file, per LUD-25
-                            raise OutputCollisionError(note_id)
-                        if (
-                            note_id in seen_mint_ids
-                            or self.conn.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,)).fetchone()
-                        ):
-                            raise OutputCollisionError(note_id)
-                        seen_mint_ids.add(note_id)
-
-                    for note_id in burn_ids:
-                        self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
-                    locked_at = int(time.time())
-                    for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
-                        self.conn.execute(
-                            "INSERT INTO notes (id, amount_msat, locked_at) VALUES (?, ?, ?)",
-                            (note_id, amount_msat, locked_at),
-                        )
-                    self.conn.execute(
-                        "INSERT INTO burns (burn_key, id, id2, amount1_msat, amount2_msat) VALUES (?, ?, ?, ?, ?)",
-                        (
-                            self._burn_key(burn_ids),
-                            mint_note_ids[0],
-                            mint_note_ids[1] if len(mint_note_ids) > 1 else None,
-                            mint_amounts[0],
-                            mint_amounts[1] if len(mint_amounts) > 1 else None,
-                        ),
-                    )
+                    self._swap_locked(burn_ids, mint_note_ids, mint_amounts)
             except sqlite3.Error as exc:
                 # exc's own text (raw sqlite3 error) is never handed back on
                 # the wire - see log_internal_error
                 raise ValueError(log_internal_error("Note swap failed", exc)) from exc
+
+    def transfer_to_username(self, burn_ids: list[str], username: str, amount_msat: int, derive: "DeriveNote") -> str:
+        """LUD-26's internal transfer: atomically burn `burn_ids` and credit
+        `amount_msat` to the next unused note of `username`'s share (see
+        _claim_index), recording the burn with `username` so a retry is
+        recognised (burn_recipient). Returns the note credited. Raises as
+        swap does, and ValueError("unknown user") if `username` is not
+        registered."""
+        with self._lock:
+            try:
+                with self.conn:
+                    note_id, _ = self._claim_index(username, derive)
+                    self._swap_locked(burn_ids, [note_id], [amount_msat], to_username=username)
+                    return note_id
+            except sqlite3.Error as exc:
+                raise ValueError(log_internal_error("Internal transfer failed", exc)) from exc
+
+    def _swap_locked(
+        self,
+        burn_ids: list[str],
+        mint_note_ids: list[str],
+        mint_amounts: list[int],
+        to_username: str | None = None,
+    ) -> None:
+        """swap's body, inside a transaction the caller holds the lock for."""
+        seen_burn_ids: set[str] = set()
+        for note_id in burn_ids:
+            if note_id in seen_burn_ids:
+                raise ValueError("Invalid or already spent k1.")
+            seen_burn_ids.add(note_id)
+            row = self.conn.execute("SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
+            if row is None:
+                raise ValueError("Invalid or already spent k1.")
+            if row[0]:
+                raise PendingNoteError("pending")
+
+        seen_mint_ids: set[str] = set()
+        for note_id in mint_note_ids:
+            if self.conn.execute(
+                "SELECT 1 FROM mints WHERE note_id = ?",
+                (note_id,),
+            ).fetchone():
+                # the note some mint invoice will credit: as taken
+                # as one already on file, per LUD-25
+                raise OutputCollisionError(note_id)
+            if note_id in seen_mint_ids or self.conn.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,)).fetchone():
+                raise OutputCollisionError(note_id)
+            seen_mint_ids.add(note_id)
+
+        for note_id in burn_ids:
+            self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
+        locked_at = int(time.time())
+        for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
+            self.conn.execute(
+                "INSERT INTO notes (id, amount_msat, locked_at) VALUES (?, ?, ?)",
+                (note_id, amount_msat, locked_at),
+            )
+        self.conn.execute(
+            "INSERT INTO burns (burn_key, id, id2, amount1_msat, amount2_msat, to_username) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                self._burn_key(burn_ids),
+                mint_note_ids[0],
+                mint_note_ids[1] if len(mint_note_ids) > 1 else None,
+                mint_amounts[0],
+                mint_amounts[1] if len(mint_amounts) > 1 else None,
+                to_username,
+            ),
+        )
 
     @staticmethod
     def _burn_key(note_ids: list[str]) -> str:
@@ -483,6 +545,14 @@ class NoteStore:
             "SELECT id, id2, amount1_msat, amount2_msat FROM burns WHERE burn_key = ?", (self._burn_key(note_ids),)
         ).fetchone()
         return tuple(row) if row else None
+
+    def burn_recipient(self, note_ids: list[str]) -> str | None:
+        """The username an internal transfer of exactly `note_ids` credited
+        (see transfer_to_username), or None for any other burn or none."""
+        row = self.conn.execute(
+            "SELECT to_username FROM burns WHERE burn_key = ?", (self._burn_key(note_ids),)
+        ).fetchone()
+        return row[0] if row else None
 
     def record_melt(self, payment_hash: str, pr: str) -> None:
         """Record which invoice a melt is paying into, keyed by its
@@ -591,98 +661,91 @@ class NoteStore:
                 grouped.setdefault(payment_hash, []).append(note_id)
         return grouped
 
-    def upsert_username(self, username: str, cx1_hex: str, nostr_pubkey_hex: str | None = None) -> None:
-        """Claims `username` for the watch-only branch `cx1_hex` (LUD-25
-        cx1 = hex(P || chain_code)), or wholesale replaces an
-        existing claim's branch/npub with this call's own (see router.py's
-        POST /p/{username}) - router.py gates every call behind its own
-        ownership-proof signature before ever calling this (a fresh claim
-        proves control of THIS cx1, an overwrite proves control of
-        whichever branch is already on file - see
-        upsert_registered_username's own docstring), since this method
-        itself has no way to tell a fresh claim from a hijack. `next_index`
-        always resets to 0 - an overwrite means a different branch, whose
-        own index 0 was never tried yet.
+    def register_username(self, username: str, cx1_hex: str, xp_hex: str, nostr_pubkey_hex: str | None = None) -> None:
+        """Claims `username` for a share, `cx1_hex` = hex(chain_code || P)
+        (LUD-26). Never overwrites: raises ValueError("already registered")
+        for a registered `username`, and ValueError("cx1 already used") for
+        a share whose x(P), `xp_hex`, this mint ever accepted before, so a
+        captured proof never applies twice. router.py gates every call behind
+        the share's own ownership proof.
 
         `nostr_pubkey_hex`, if given, doubles `username` as a NIP-05 name
         (see nostr_pubkey/router.get_nip05) - a WALLET-supplied npub,
-        decoded, orthogonal to cx1 (a username can carry one, the other,
-        both, or neither). Omitting it on an overwrite clears any
-        previously registered one, same replace-wholesale semantics as
-        cx1 itself."""
+        decoded, orthogonal to cx1."""
         with self._lock, self.conn:
+            if self.conn.execute("SELECT 1 FROM usernames WHERE username = ?", (username,)).fetchone():
+                raise ValueError("already registered")
+            self._accept_key(xp_hex)
             self.conn.execute(
-                "INSERT INTO usernames (username, cx1, nostr_pubkey, next_index) VALUES (?, ?, ?, 0)"
-                " ON CONFLICT(username) DO UPDATE SET cx1 = excluded.cx1, nostr_pubkey = excluded.nostr_pubkey,"
-                " next_index = 0",
+                "INSERT INTO usernames (username, cx1, nostr_pubkey, next_index) VALUES (?, ?, ?, 0)",
                 (username, cx1_hex, nostr_pubkey_hex),
             )
+
+    def update_username(self, username: str, cx1_hex: str, xp_hex: str) -> None:
+        """Moves a registered `username` to a new share without ever freeing
+        it (LUD-26's PUT), auto-minting from the new share's index 0 on.
+        Raises ValueError("unknown user") if it is not registered, and
+        ValueError("cx1 already used") as register_username does."""
+        with self._lock, self.conn:
+            if not self.conn.execute("SELECT 1 FROM usernames WHERE username = ?", (username,)).fetchone():
+                raise ValueError("unknown user")
+            self._accept_key(xp_hex)
+            self.conn.execute("UPDATE usernames SET cx1 = ?, next_index = 0 WHERE username = ?", (cx1_hex, username))
+
+    def _accept_key(self, xp_hex: str) -> None:
+        """Records a share key as accepted, refusing one accepted before.
+        Caller holds the lock and the transaction."""
+        if self.conn.execute("INSERT OR IGNORE INTO accepted_keys (xp) VALUES (?)", (xp_hex,)).rowcount != 1:
+            raise ValueError("cx1 already used")
 
     def delete_username(self, username: str) -> None:
         """Frees `username` entirely - it goes back to being unclaimed,
         first-come-first-served for anyone (see router.py's DELETE
-        /p/{username}, which gates this behind the same ownership-proof
-        signature the overwrite path uses). A no-op if it was never
-        claimed."""
+        /.well-known/lnurlp/{username}, which gates this behind the
+        ownership proof of the share on file). Its share stays accepted, so
+        it is never registered again. A no-op if it was never claimed."""
         with self._lock, self.conn:
             self.conn.execute("DELETE FROM usernames WHERE username = ?", (username,))
 
     def username_branch(self, username: str) -> str | None:
-        """The cx1 hex (P || chain_code) registered under `username`, or
-        None if it was never claimed (see upsert_username)."""
+        """The cx1 hex registered under `username` - hex(chain_code || P),
+        or hex(x(P) || chain_code) for one registered before LUD-26 - or
+        None if it was never claimed."""
         row = self.conn.execute("SELECT cx1 FROM usernames WHERE username = ?", (username,)).fetchone()
         return row[0] if row else None
 
     def nostr_pubkey(self, username: str) -> str | None:
         """The hex Nostr pubkey `username` registered (see
-        upsert_username), or None if it was never claimed, or was claimed
+        register_username), or None if it was never claimed, or was claimed
         with no npub - both are "not a NIP-05 name" to router.get_nip05."""
         row = self.conn.execute("SELECT nostr_pubkey FROM usernames WHERE username = ?", (username,)).fetchone()
         return row[0] if row else None
 
-    def next_index_hint(self, username: str) -> int | None:
-        """The persisted best-known next-unused index on `username`'s
-        registered branch (LUD-25's Internal transfer,
-        router.get_lnaddress's `text/cpub` metadata entry) - a plain read
-        of the same `next_index` column claim_next_index reserves from,
-        with none of its collision-skipping. Purely advisory ("`i` is
-        only a hint" per spec): a WALLET starts guessing from it, but
-        SERVICE still rejects a stale or already-taken index exactly like
-        any other p1/p2 collision, the same way claim_next_index itself
-        would skip past one. None if `username` was never claimed."""
-        row = self.conn.execute("SELECT next_index FROM usernames WHERE username = ?", (username,)).fetchone()
-        return row[0] if row else None
+    def _claim_index(self, username: str, derive: "DeriveNote") -> tuple[str, int]:
+        """Picks and reserves the next usable note on `username`'s share -
+        LUD-26's Crediting: `derive(cx1_hex, i)` (router._share_note_id) is
+        tried from the persisted next_index on, skipping any index that
+        derives no key or whose note is outstanding, previously burned, or
+        some unpaid mint's, so a skipped index answers "already in use" and
+        a recovery scan counts it as used. Persists next_index past the
+        winner and returns (pk_hex, index). Caller holds the lock and the
+        transaction. Raises ValueError("unknown user") if `username` is not
+        registered."""
+        row = self.conn.execute("SELECT cx1, next_index FROM usernames WHERE username = ?", (username,)).fetchone()
+        if row is None:
+            raise ValueError("unknown user")
+        cx1_hex, index = row
+        while True:
+            pk_hex = derive(cx1_hex, index)
+            if pk_hex is not None and not self._id_in_use(pk_hex):
+                break
+            index += 1
+        self.conn.execute("UPDATE usernames SET next_index = ? WHERE username = ?", (index + 1, username))
+        return pk_hex, index
 
-    def claim_next_index(self, username: str, derive: Callable[[int], str]) -> tuple[str, int]:
-        """Picks and reserves the next usable note index on `username`'s
-        registered branch - LUD-25's own race-avoidance paragraph under
-        Lightning Address auto-mint: `derive(i)` (router.py, wrapping
-        derivation.derive_pubkey at PURPOSE_LIGHTNING_ADDRESS) is tried
-        starting at the persisted next_index, skipping any index whose
-        resulting pubkey already names an outstanding *or* previously-minted
-        note - the same collision create_mint itself would reject - rather
-        than crediting into an index a pending rotate/split/merge (or
-        another internal transfer targeting this same branch) might also be
-        about to install. Since PURPOSE_LIGHTNING_ADDRESS is its own counter,
-        separate from a WALLET's own PURPOSE_WALLET/PURPOSE_CHANGE notes on
-        this same branch, this can never collide with one of those - only
-        with another use of this same purpose. Persists next_index past the
-        winner and returns
-        (pk_hex, index) for the caller to mint under, exactly like a
-        WALLET-supplied cp1. Raises ValueError if `username` was
-        never registered."""
-        with self._lock, self.conn:
-            row = self.conn.execute("SELECT next_index FROM usernames WHERE username = ?", (username,)).fetchone()
-            if row is None:
-                raise ValueError("Unknown username.")
-            index = row[0]
-            while True:
-                pk_hex = derive(index)
-                if not self._id_in_use(pk_hex):
-                    break
-                index += 1
-            self.conn.execute("UPDATE usernames SET next_index = ? WHERE username = ?", (index + 1, username))
-            return pk_hex, index
 
+# a registered share's note at an index, from the cx1 hex on file: hex(Q),
+# or None for an index that derives no key (router._share_note_id)
+DeriveNote = Callable[[str, int], "str | None"]
 
 notes = NoteStore(settings.database_path)

@@ -5,6 +5,7 @@ lnurlcashkernel (see spend.py)."""
 from os import urandom
 
 import pytest
+from coincurve import PrivateKey
 
 from lnurl_mint import bech32m
 
@@ -32,13 +33,35 @@ def test_bip173_bech32_vector_is_rejected_as_bech32m():
     "encode,decode,length",
     [
         (bech32m.encode_cp1, bech32m.decode_cp1, 32),
-        (bech32m.encode_cx1, bech32m.decode_cx1, 64),
+        (bech32m.encode_legacy_cx1, bech32m.decode_legacy_cx1, 64),
+        (bech32m.encode_cx1, bech32m.decode_cx1, 65),
     ],
 )
 def test_roundtrip(encode, decode, length):
-    data = urandom(length)
+    data = _cx1_payload() if length == 65 else urandom(length)
     encoded = encode(data)
     assert decode(encoded) == data
+
+
+def _cx1_payload() -> bytes:
+    """chain_code || P: a cx1 decodes only when P is a compressed point."""
+    return urandom(32) + PrivateKey().public_key.format(compressed=True)
+
+
+def _cs1_payload() -> bytes:
+    """r || s || recovery-id: a cs1 decodes only with a recovery id 0-3."""
+    return urandom(64) + bytes([urandom(1)[0] % 4])
+
+
+def test_a_cx1_whose_p_is_no_point_or_the_old_shape_is_refused():
+    p = PrivateKey().public_key.format(compressed=True)
+    assert bech32m.decode_cx1(bech32m.encode_cx1(urandom(32) + b"\x04" + p[1:])) is None
+    assert bech32m.decode_cx1(bech32m.encode_cx1(urandom(32) + b"\x02" + b"\xff" * 32)) is None
+    assert bech32m.decode_cx1(bech32m.encode_legacy_cx1(urandom(64))) is None
+
+
+def test_a_cs1_with_a_recovery_id_above_3_is_refused():
+    assert bech32m.decode_cs1(bech32m.encode_cs1(1000, urandom(64) + b"\x04")) is None
 
 
 @pytest.mark.parametrize("amount_msat", [0, 1, 1000, 21000, 5000, 100_000_000])
@@ -46,7 +69,7 @@ def test_cs1_roundtrip_carries_the_amount_in_its_hrp(amount_msat):
     """cs1, unlike its siblings, folds amount_msat into its own HRP (BOLT-11
     style) rather than needing it supplied alongside the certificate - see
     25.md's Encoding."""
-    sig = urandom(65)
+    sig = _cs1_payload()
     encoded = bech32m.encode_cs1(amount_msat, sig)
     assert encoded.startswith("cs")
     assert bech32m.decode_cs1(encoded) == (amount_msat, sig)
@@ -55,7 +78,7 @@ def test_cs1_roundtrip_carries_the_amount_in_its_hrp(amount_msat):
 def test_encoded_lengths_match_the_spec():
     """25.md's Encoding section states each prefix's exact total length."""
     assert len(bech32m.encode_cp1(urandom(32))) == 61
-    assert len(bech32m.encode_cx1(urandom(64))) == 112
+    assert len(bech32m.encode_cx1(_cx1_payload())) == 113
     # cs1's total length is no longer fixed - it grows with the number of
     # digits its amount needs (its HRP is "cs" + amount + multiplier, see
     # encode_cs1) - but the example the spec itself gives, "cs10n<...>" for
@@ -68,11 +91,11 @@ def test_wrong_length_raises_on_encode():
     with pytest.raises(ValueError):
         bech32m.encode_cp1(urandom(31))
     with pytest.raises(ValueError):
-        bech32m.encode_cx1(urandom(63))
+        bech32m.encode_cx1(urandom(64))
 
 
 def test_wrong_hrp_is_rejected():
-    assert bech32m.decode_cp1(bech32m.encode_cx1(urandom(64))) is None
+    assert bech32m.decode_cp1(bech32m.encode_cx1(_cx1_payload())) is None
     assert bech32m.decode_cp1(bech32m.encode("ck", urandom(32))) is None
 
 
@@ -86,10 +109,10 @@ def test_corrupted_checksum_is_rejected():
 
 def test_exceeds_bip173_length_limit_but_still_decodes():
     """25.md explicitly departs from BIP-173's ~90-character segwit-address
-    cap for cs1/cx1 (116/112 chars) - bech32_decode from the `bech32`
+    cap for cs1/cx1 (116/113 chars) - bech32_decode from the `bech32`
     dependency enforces that cap and would reject these, which is exactly
     why bech32m.decode reimplements the length check itself."""
-    cx1 = bech32m.encode_cx1(urandom(64))
+    cx1 = bech32m.encode_cx1(_cx1_payload())
     assert len(cx1) > 90
     assert bech32m.decode_cx1(cx1) is not None
 

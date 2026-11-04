@@ -133,7 +133,7 @@ def test_t2_routing_node_race_p_alone_is_sufficient(client: TestClient, mint_not
     # the legitimate payer arrives a moment later with the same P - too late
     _, victim_h = fresh_secret()
     r = client.get(f"/w/cb?k1={k1}&p1={victim_h}").json()
-    assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+    assert r == {"status": "ERROR", "reason": "already in use"}
 
 
 def test_t2b_comment_protected_note_defeats_the_routing_node_race(client: TestClient, node):
@@ -204,7 +204,7 @@ def test_t4_callback_log_replay_fails_control(client: TestClient, mint_note):
     # ATTACKER, reading the logged callback URL after the fact: replay it
     _, attacker_h = fresh_secret()
     r = client.get(f"/w/cb?k1={k1}&p1={attacker_h}").json()
-    assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+    assert r == {"status": "ERROR", "reason": "already in use"}
     assert notes.note_amount(bearer_id(h)) == VALUE  # the rotated note is untouched
 
 

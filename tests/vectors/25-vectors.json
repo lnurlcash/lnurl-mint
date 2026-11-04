@@ -1,0 +1,74 @@
+{
+  "description": "LUD-25 test vectors. Hex values are big-endian byte strings unless noted. Every spend was accepted by Bitcoin Core's interpreter (libbitcoinkernel) against the canonical spend transaction.",
+  "key_path_spend": {
+    "description": "ck1 for an arbitrary key-path note, signed with an all-zero aux_rand. The same ck1 fails at any other domain.",
+    "sk": "3616b02290a133da73e758a54dbff1bf6439b4067a820cb51ca873fa4a13a96a",
+    "Q": "690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f",
+    "cp1": "cp1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0sxpcl6z",
+    "domain": "mint.example",
+    "prevout_txid": "d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b2",
+    "spent_script_pubkey": "5120690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f",
+    "sigmsg_fields": {
+      "hash_type": "00",
+      "nVersion": "02000000",
+      "nLockTime": "00000000",
+      "sha_prevouts": "30b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024",
+      "sha_amounts": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "sha_scriptpubkeys": "6ca88527eb01d83d9c7eec6d169b4813ee5567ac7b83a83b5da812fac542d09d",
+      "sha_sequences": "ad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e",
+      "sha_outputs": "3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d",
+      "spend_type": "00",
+      "input_index": "00000000"
+    },
+    "sigmsg": "00020000000000000030b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc6ca88527eb01d83d9c7eec6d169b4813ee5567ac7b83a83b5da812fac542d09dad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d0000000000",
+    "sighash": "e97bb6831a916ff83919046f50a39c18ab98bf43079cf68cd364d251f7de527f",
+    "aux_rand": "0000000000000000000000000000000000000000000000000000000000000000",
+    "sig": "fc3491f1c6bca73dcd76b38fc6b7a82aef0f1fa67212ceb7d7f64dbc41c8bfe77e0db6077624bf117badb65efe0445e382ac9f4cd582f7a5cc366c7aeb4580d4",
+    "spend_tx": "02000000000101d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b20000000000ffffffff010000000000000000000140fc3491f1c6bca73dcd76b38fc6b7a82aef0f1fa67212ceb7d7f64dbc41c8bfe77e0db6077624bf117badb65efe0445e382ac9f4cd582f7a5cc366c7aeb4580d400000000",
+    "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0lcdy378rtefeae4mt8r7xk75z4mc0r7n8yykwkltlvndug8ytlem7pkmqwa3yhughhtdktmlqg30rs2kf7nx4stm6tnpkd3awk3vq6smm20wz"
+  },
+  "certificates": {
+    "description": "cs1 certificates from an arbitrary SERVICE key. Signed for domain mint.example. The amount changes both the signed message and cs1's human-readable part; the domain changes the signed message. Signatures are r || s || recovery-id.",
+    "service_sk": "a8358061952ee158b42ffe1607c00adda3e63098247f837f08a4ef9492b4f798",
+    "mintPubkey": "035acdbd57663f858be6d61ec4bfcbc99492699010f1451e30a6550f26295e813d",
+    "Q": "690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f",
+    "domain": "mint.example",
+    "cases": [
+      {
+        "amount_msat": 1000,
+        "message": "LNURLcash:mint.example:1000:690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f",
+        "digest": "084dbb1bf4c84e6bb08da9c283208f07c546305855e74f06834adc7257c3644b",
+        "signature": "8863e702d6a676cde369439645104dc793106eec12d1bde8f13a7d95d3079c560fe39eff7edf0b7b4ccee16a7273b7373b04c813b0cfd1e297e2d7a9ba0bce9901",
+        "cs1": "cs10n13p37wqkk5emvmcmfgwty2yzdc7f3qmhvztgmm6838f7et5c8n3tqlcu7lald7zmmfn8wz6njwwmnwwcyeqfmpn73u2t794afhg9uaxgpyam087"
+      },
+      {
+        "amount_msat": 21000000,
+        "message": "LNURLcash:mint.example:21000000:690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f",
+        "digest": "cdda839535b2705e17d5587c1cfde7ae50df8afaeba822a9ea898cc7fdc86049",
+        "signature": "2b3b440e3befbf3632f006b497d0a57fcb23eca47bc33531b7baf74f4d922cc863fff6a9cd1c5deda86751509b57c68da6a51a92e1d3ab6acb5a3eca369f365000",
+        "cs1": "cs210u19va5gr3ma7lnvvhsq66f05990l9j8m9y00pn2vdhhtm57nvj9nyx8llk48x3ch0d4pn4z5ym2lrgmf49r2fwr5atdt9450k2x60nv5qqt2u5km"
+      }
+    ]
+  },
+  "bearer_note": {
+    "description": "A bearer note: both short forms, its full cw1, and a cs1 from the certificates SERVICE key. The hex preimage and the cw1 are the same spend and open Q at any domain.",
+    "preimage": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "h": "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd",
+    "leaf": "a820630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd87",
+    "tapleaf_hash": "edffc9fa683d8844ded0ba5ec4215d5940ae436b0675257c1344bcb082516b50",
+    "H": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "tweak": "5649b0259110c0c11426819ea5a40b53e5a9a2b8c6fb3d6c43217df73b326364",
+    "Q": "d18b619687343df2fc7a47e1daf25260b909bb563fb4b4b11e59e2bd64880982",
+    "control_block": "c050929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "cp1": "cp16x9kr958xs7l9lr6glsa4ujjvzusnw6k876tfvg7t83t6eygpxpq6we0xc",
+    "cw1": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8c6x6a4c",
+    "certificate": {
+      "amount_msat": 1000,
+      "message": "LNURLcash:mint.example:1000:d18b619687343df2fc7a47e1daf25260b909bb563fb4b4b11e59e2bd64880982",
+      "digest": "ea40ba003bab3fc5f12418e8eb55ce8cc55fdc18ae69450d5f6a9ebd9221ff0f",
+      "signature": "338e4b8b887407414bd604b4398249b1325db817471499dff3dfc4152a6d81dc54229d61706a0ef8ed79b142e1799b597d2f07b55ffb268df4a00404ac9fd53201",
+      "cs1": "cs10n1xw8yhzugwsr5zj7kqj6rnqjfkye9mwqhgu2fnhlnmlzp22nds8w9gg5av9cx5rhca4umzshp0xd4jlf0q764l7ex3h62qpqy4j0a2vsp2kjsk5"
+    },
+    "note_url": "lnurlw://mint.example/w?k1=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&c=cs10n1xw8yhzugwsr5zj7kqj6rnqjfkye9mwqhgu2fnhlnmlzp22nds8w9gg5av9cx5rhca4umzshp0xd4jlf0q764l7ex3h62qpqy4j0a2vsp2kjsk5"
+  }
+}

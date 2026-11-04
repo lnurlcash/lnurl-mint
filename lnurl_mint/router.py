@@ -7,6 +7,7 @@ import time
 from hashlib import sha256
 from http import HTTPStatus
 from typing import Awaitable, Callable
+from urllib.parse import parse_qsl, urlsplit
 
 import bolt11
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
@@ -19,6 +20,7 @@ from .error_handler import LnurlErrorResponseHandler
 from .errors import log_internal_error
 from .mint_log import log_melt, log_mint
 from .models import (
+    InternalTransferResponse,
     LnurlErrorResponse,
     LnurlMintAddressResponse,
     LnurlPayActionResponse,
@@ -292,7 +294,7 @@ async def _mint_settled_by_note_id(note_id: str) -> bool:
         return False
     if not await is_invoice_settled(payment_hash, funding_source):
         return False
-    net_amount_msat = notes.settle_mint(payment_hash)
+    net_amount_msat = notes.settle_mint(payment_hash, _share_note_id)
     if net_amount_msat is not None:
         _log_mint_settled(payment_hash, net_amount_msat)
     return True
@@ -315,7 +317,7 @@ async def _mint_settled(payment_hash: str) -> bool:
         return False
     if not await is_invoice_settled(payment_hash, funding_source):
         return False
-    net_amount_msat = notes.settle_mint(payment_hash)
+    net_amount_msat = notes.settle_mint(payment_hash, _share_note_id)
     if net_amount_msat is not None:
         # None means a concurrent request already settled this same
         # invoice first (see NoteStore.settle_mint) - only the call that
@@ -539,6 +541,17 @@ _ZAP_POLL_WINDOW_SECONDS = 60 * 60
 _ZAP_POLL_LIMIT = 100
 
 
+async def settle_polled_mints(now: int | None = None) -> None:
+    """Settle every recently issued invoice only a poll can settle (see
+    NoteStore.pending_polled_mints): a zap's, and a registered Lightning
+    Address's, whose note is picked when it settles (LUD-26's Crediting) so
+    no lookup can name it before then. Run every ZAP_POLL_INTERVAL_SECONDS
+    by server.py."""
+    now = int(time.time()) if now is None else now
+    for payment_hash in notes.pending_polled_mints(now - _ZAP_POLL_WINDOW_SECONDS, _ZAP_POLL_LIMIT):
+        await _mint_settled(payment_hash)
+
+
 async def publish_zap_receipts(funding_source: LightningBackendConfig, now: int | None = None) -> int:
     """Settle every recently issued zap invoice the funding source says
     was paid (the note lands on the username's branch exactly as any
@@ -547,9 +560,7 @@ async def publish_zap_receipts(funding_source: LightningBackendConfig, now: int 
     plus NOSTR_RELAYS. A receipt that no relay takes stays unpublished
     and is retried next round. Run every ZAP_POLL_INTERVAL_SECONDS by
     server.py; returns how many receipts were published."""
-    now = int(time.time()) if now is None else now
-    for payment_hash in notes.pending_zap_mints(now - _ZAP_POLL_WINDOW_SECONDS, _ZAP_POLL_LIMIT):
-        await _mint_settled(payment_hash)
+    await settle_polled_mints(now)
     published = 0
     assert settings.nostr_key is not None
     secret = settings.nostr_key.get_secret_value()
@@ -583,7 +594,9 @@ def _known_username(username: str) -> bool:
     same normalization _registered_username_branch applies for a
     registered one."""
     normalized = username.lower()
-    return normalized == settings.username.lower() or normalized == "_"
+    # `mint` is always the mint's own payRequest too: LUD-26 has a WALLET
+    # find the withdrawLink and fees at mint@<domain> from the domain alone
+    return normalized in (settings.username.lower(), "_", "mint")
 
 
 # a registrable username (router.upsert_registered_username): lowercase-
@@ -621,85 +634,123 @@ def _registrable_username(username: str) -> bool:
     return bool(_USERNAME_PATTERN.match(username)) and not _known_username(username)
 
 
-def _owns_branch(action: str, domain: str, username: str, branch_hex: str, sig_hex: str) -> bool:
-    """Whether `sig_hex` is a valid ownership-proof Schnorr signature (see
-    signing.verify_register_signature) by `branch_hex`'s own
-    PURPOSE_WALLET index-0 public key - "the first secret" a WALLET
-    derives on a branch, an ordinary note key doubling as this branch's
-    stable identity (not a fourth, identity-specific purpose). This is a
-    DIFFERENT key from the one claim_next_index hands a note out under
-    first (PURPOSE_LIGHTNING_ADDRESS index 0, a separate counter on the
-    same branch) - the two purposes exist precisely so a WALLET's own
-    identity key and this mint's own auto-minted notes never share an
-    index.
-    `action` ("register" or "unregister"), `domain` (this mint's own
-    resolved host - see call sites), and `username` are folded into the
-    signed message itself, per 25.md - domain separation from a note's own
-    `ck1` (see signing._CK1_SCHNORR_DIGEST); from any other username's
-    proof or this same username's other action, so a signature captured
-    from one overwrite/delete can never be replayed against a different
-    username sharing this branch, or against the other action for this
-    same one; and from any other mint, so a proof captured here can never
-    be replayed by this mint against a different one. Gates every path
-    through upsert_registered_username (both a fresh claim, proven against
-    the NEW cx1 being submitted, and an overwrite, proven against whichever
-    branch is CURRENTLY on file - see that function's own docstring for why
-    those differ) and delete_registered_username outright - there is no
-    proof-free case left; `sig` is a required parameter at both call
-    sites, never optional."""
-    branch = bytes.fromhex(branch_hex)
-    branch_point, chain_code = branch[:32], branch[32:]
-    expected = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_WALLET, 0)
-    return verify_register_signature(expected, sig_hex, action, domain, username)
+def _address_name(username: str) -> str:
+    """The username a Lightning Address names: lowercased, any `+<tag>`
+    dropped (LUD-16), since a tagged payment auto-mints into the untagged
+    username's share like any other (LUD-26). `+` is never part of a
+    registrable username (_USERNAME_PATTERN), so nothing else can match."""
+    return username.lower().split("+", 1)[0]
 
 
-@router.post("/p/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse)
-def upsert_registered_username(
-    req: Request, username: str, cx1: str, sig: str, npub: str | None = None
-) -> RegisterUsernameResponse:
-    """LUD-25 Seed & derivation's cx1 registration: claims
-    `username` for a WALLET's watch-only branch export (`cx1<P || chain
-    code>`), so paying `.well-known/lnurlp/{username}` with no comment
-    auto-mints a fresh `cp1` note directly on that branch for every payment
-    received (see get_pay_callback_for_username, NoteStore.claim_next_index)
-    - no per-payment WALLET involvement needed.
+def _domain(req: Request) -> str:
+    """This mint's domain as the request reached it: the lowercase hostname,
+    without scheme or port - what certificates and registration proofs
+    name, the same string its canonical spend transaction commits to."""
+    _, host = settings.public_base_url_and_host(str(req.base_url))
+    return (urlsplit(f"//{host}").hostname or host).lower()
 
-    Always proven, never proof-free - even for a fresh, unclaimed
-    `username`: `sig` (see _owns_branch) is a required ownership-proof
-    signature over "LNURLcash:register:<domain>:<username>"
-    (signing.verify_register_signature, `domain` this mint's own resolved
-    host), so it can never be confused with a note's own `ck1`, another
-    username's proof, this same username's unregister proof, or the same
-    proof captured and replayed by a different mint. What it must prove
-    differs by case, though:
-    - A fresh claim proves the caller actually controls the `cx1` being
-      submitted right now (signed with THAT branch's own index-0 secret
-      key).
-    - Calling this again on an ALREADY-registered `username` instead
-      overwrites it wholesale (new `cx1`, new or absent `npub`) - proving
-      continued control of the branch CURRENTLY on file instead, not of
-      the new `cx1` being switched to (a WALLET migrating to a new seed
-      still holds its old one long enough to sign this once).
+
+def _share_on_file(cx1_hex: str) -> tuple[bool, bytes] | None:
+    """(legacy, bytes) of the share a username holds. LUD-26's is
+    hex(chain_code || P), 65 bytes; one registered before LUD-26 holds the
+    superseded hex(x(P) || chain_code), 64 bytes, and keeps auto-minting
+    under the old purpose-2 tweak until its owner moves it to a share
+    (update_registered_username) - so an address does not stop working the
+    day this mint upgrades. None for anything else."""
+    data = bytes.fromhex(cx1_hex)
+    if len(data) == 65:
+        return False, data
+    if len(data) == 64:
+        return True, data
+    return None
+
+
+def _share_xp(cx1_hex: str) -> bytes | None:
+    """x(P) of the share on file: what its proofs verify against."""
+    share = _share_on_file(cx1_hex)
+    if share is None:
+        return None
+    legacy, data = share
+    return data[:32] if legacy else data[33:]
+
+
+def _share_note_id(cx1_hex: str, index: int) -> str | None:
+    """hex(Q) of note `index` of the share on file (NoteStore._claim_index's
+    `derive`): BIP-32 CKDpub from a LUD-26 cx1, or the old purpose-2 tweak
+    from one registered before it. None for an index that derives no key."""
+    share = _share_on_file(cx1_hex)
+    if share is None:
+        return None
+    legacy, data = share
+    try:
+        if legacy:
+            return derivation.legacy_derive_pubkey(
+                data[:32], data[32:], derivation.PURPOSE_LIGHTNING_ADDRESS, index
+            ).hex()
+        return derivation.derive_note_pubkey(data, index).hex()
+    except ValueError:
+        return None
+
+
+def _proves(action: str, domain: str, username: str, cx1: str | None, signer_xp: bytes, sig_hex: str) -> bool:
+    """Whether `sig_hex` is a share's ownership proof (see
+    signing.verify_register_signature) by `signer_xp`, over `action`'s
+    message for `domain`, `username` and, for register and update, `cx1` in
+    its canonical lowercase spelling. Gates every registration, update and
+    unregistration - there is no proof-free case."""
+    return verify_register_signature(signer_xp, sig_hex, action, domain, username, cx1.lower() if cx1 else None)
+
+
+async def _form(req: Request) -> dict[str, str]:
+    """A registration's parameters: the `application/x-www-form-urlencoded`
+    body LUD-26 sends them in (so a browser WALLET's POST needs no CORS
+    preflight), then the query string."""
+    params = dict(parse_qsl((await req.body()).decode(errors="replace")))
+    for key, value in req.query_params.items():
+        params.setdefault(key, value)
+    return params
+
+
+def _required(params: dict[str, str], name: str) -> str:
+    value = params.get(name)
+    if value is None:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, f"Missing {name}.")
+    return value
+
+
+@router.post(
+    "/.well-known/lnurlp/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse
+)
+async def register_username(req: Request, username: str) -> RegisterUsernameResponse:
+    """LUD-26 registration, at the very Lightning Address it claims: form
+    body `cx1`, `sig`, optional `npub`. Paying the address then auto-mints
+    a fresh note on that share for every payment received (see
+    get_pay_callback_for_username, NoteStore.settle_mint) - no per-payment
+    WALLET involvement needed.
+
+    `sig` is the share's own key over
+    "LNURLcash:register:<domain>:<username>:<cx1>" (see _proves). A
+    registration is never overwritten ("already registered" - a username
+    moves with update_registered_username instead), and a share this mint
+    ever accepted is never registered again ("cx1 already used"), so a
+    captured proof never applies twice.
 
     `username` is lowercased before validation and storage - a registered
-    username is always case-insensitive (see _known_username), so this is
-    the one place that normalization actually has to happen; every lookup
-    site just lowercases its own input to match.
+    username is always case-insensitive (see _known_username).
 
     `npub`, if given, is this same `username` doubling as a NIP-05 name
-    (see get_nip05): decoded and stored alongside cx1 - rejected outright
-    while settings.nip05_enabled is off, rather than accepted and stored for
-    an endpoint that won't resolve it (see that setting's own docstring,
-    independent of username_registration_enabled itself). Omitted on an
-    overwrite, any previously registered npub is cleared - this call
-    replaces the registration wholesale, it does not merge into it."""
+    (see get_nip05) - rejected outright while settings.nip05_enabled is
+    off, rather than accepted and stored for an endpoint that won't
+    resolve it."""
     if not settings.username_registration_enabled:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
+    params = await _form(req)
+    cx1, sig, npub = _required(params, "cx1"), _required(params, "sig"), params.get("npub")
     username = username.lower()
     if not _registrable_username(username):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid or reserved username.")
-    branch = bech32m.decode_cx1(cx1)
-    if branch is None:
+    share = bech32m.decode_cx1(cx1)
+    if share is None:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid cx1.")
     nostr_pubkey_hex: str | None = None
     if npub is not None:
@@ -709,37 +760,71 @@ def upsert_registered_username(
         if decoded_npub is None:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid npub.")
         nostr_pubkey_hex = decoded_npub.hex()
-    existing_branch_hex = notes.username_branch(username)
-    # a fresh claim proves control of the NEW branch being submitted; an
-    # overwrite proves continued control of whichever branch is CURRENTLY
-    # on file instead - see this function's own docstring for why those
-    # must differ
-    proof_branch_hex = existing_branch_hex if existing_branch_hex is not None else branch.hex()
-    _, domain = settings.public_base_url_and_host(str(req.base_url))
-    if not _owns_branch("register", domain, username, proof_branch_hex, sig):
+    if not _proves("register", _domain(req), username, cx1, share[33:], sig):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid ownership signature.")
-    notes.upsert_username(username, branch.hex(), nostr_pubkey_hex)
+    try:
+        notes.register_username(username, share.hex(), share[33:].hex(), nostr_pubkey_hex)
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
     return RegisterUsernameResponse()
 
 
-@router.delete("/p/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse)
-def delete_registered_username(req: Request, username: str, sig: str) -> RegisterUsernameResponse:
-    """Frees `username` entirely (NoteStore.delete_username) - it goes back
-    to being unclaimed, first-come-first-served for anyone, same as it was
-    never registered. `sig`, an ownership-proof signature over
-    "LNURLcash:unregister:<domain>:<username>" (see _owns_branch) - a
-    different message than upsert_registered_username's own overwrite
-    proof, so one can never be replayed as the other - is mandatory here
-    too: there is no proof-free case for deleting an address someone else
-    may depend on."""
+@router.put(
+    "/.well-known/lnurlp/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse
+)
+async def update_registered_username(req: Request, username: str) -> RegisterUsernameResponse:
+    """LUD-26 update: moves a registered `username` to a new share without
+    ever freeing it. Form body `cx1` (the new share), `sig` by the key on
+    file over "LNURLcash:update:<domain>:<username>:<cx1>", binding the
+    new cx1 so the proof cannot redirect the username anywhere else, and
+    `newsig` by the new share over the register message a POST would carry.
+    Auto-mint starts over at the new share's index 0; notes already credited
+    to the old share stay there. A username registered before LUD-26 moves
+    the same way, `sig` by its old branch key."""
     if not settings.username_registration_enabled:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
+    params = await _form(req)
+    cx1, sig, newsig = _required(params, "cx1"), _required(params, "sig"), _required(params, "newsig")
     username = username.lower()
-    existing_branch_hex = notes.username_branch(username)
-    if existing_branch_hex is None:
-        raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
-    _, domain = settings.public_base_url_and_host(str(req.base_url))
-    if not _owns_branch("unregister", domain, username, existing_branch_hex, sig):
+    on_file = notes.username_branch(username)
+    if on_file is None:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "unknown user")
+    share = bech32m.decode_cx1(cx1)
+    if share is None:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid cx1.")
+    on_file_xp = _share_xp(on_file)
+    domain = _domain(req)
+    if (
+        on_file_xp is None
+        or not _proves("update", domain, username, cx1, on_file_xp, sig)
+        or not _proves("register", domain, username, cx1, share[33:], newsig)
+    ):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid ownership signature.")
+    try:
+        notes.update_username(username, share.hex(), share[33:].hex())
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
+    return RegisterUsernameResponse()
+
+
+@router.delete(
+    "/.well-known/lnurlp/{username}", tags=["lnurlcash"], response_model=RegisterUsernameResponse | LnurlErrorResponse
+)
+async def delete_registered_username(req: Request, username: str) -> RegisterUsernameResponse:
+    """Frees `username` entirely (NoteStore.delete_username) - it goes back
+    to being unclaimed, first-come-first-served for anyone, though its
+    share is never registered again. Form body `sig` by the key on file over
+    "LNURLcash:unregister:<domain>:<username>" (see _proves) - there is no
+    proof-free case for deleting an address someone else may depend on."""
+    if not settings.username_registration_enabled:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
+    sig = _required(await _form(req), "sig")
+    username = username.lower()
+    on_file = notes.username_branch(username)
+    if on_file is None:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "unknown user")
+    on_file_xp = _share_xp(on_file)
+    if on_file_xp is None or not _proves("unregister", _domain(req), username, None, on_file_xp, sig):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid ownership signature.")
     notes.delete_username(username)
     return RegisterUsernameResponse()
@@ -795,21 +880,16 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     derive into straight from the URL, no extra parameter needed.
     Unregistered, unrecognized names still 404.
 
-    A registered username's metadata additionally carries a `text/cpub`
-    entry (LUD-25's Internal transfer): this same branch's
-    own `cx1`, appended with `:<i>`, the best-known next-unused index on
-    it (NoteStore.next_index_hint). A payer's WALLET already holding a
-    `cp1`/`ck1` note on this same mint can read that straight off this
-    response and skip Lightning entirely - deriving `pk_i` itself and
-    naming it as `p1`/`p2` on an ordinary rotate/split/merge - rather
-    than paying an invoice just to reach the same auto-mint this address
-    would otherwise perform. `i` is only a hint; a stale or
-    already-claimed one is rejected exactly like any other p1/p2
-    collision, and `WALLET` just retries at the next index. The fixed
-    identity has no branch of its own, so it never carries this entry."""
+    A registered username's payRequest is an ordinary Lightning Address:
+    it publishes no key of its share (LUD-26 dropped `text/cpub`), and a
+    payer's WALLET holding a note on this same mint sends the note itself
+    to the callback instead of paying an invoice (see
+    get_pay_callback_for_username's internal transfer). `<username>+<tag>`
+    is the same address (see _address_name)."""
+    username = _address_name(username)
     registered = _known_username(username) or _registered_username_branch(username) is not None
     if not registered:
-        raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
+        raise HTTPException(HTTPStatus.NOT_FOUND, "unknown user")
     base, host = settings.public_base_url_and_host(str(req.base_url))
     metadata_entries = [
         ["text/plain", f"Mint an lnurlcash bearer note on {host}"],
@@ -819,12 +899,6 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
         # names should see that same identity confirmed here
         ["text/identifier", f"{username}@{host}"],
     ]
-    if not _known_username(username):
-        branch_hex = _registered_username_branch(username)
-        if branch_hex is not None:
-            index_hint = notes.next_index_hint(username.lower()) or 0
-            cx1 = bech32m.encode_cx1(bytes.fromhex(branch_hex))
-            metadata_entries.append(["text/cpub", f"{cx1}:{index_hint}"])
     if settings.base_fee_msat or settings.fee_percent_ppm:
         # a SERVICE that omits this entry is assumed fee-free per spec, so
         # it's only added when there's actually a fee to disclose
@@ -919,11 +993,12 @@ async def get_mint_address(req: Request, username: str) -> LnurlMintAddressRespo
     settings.username either way - both name the same fixed identity, not
     two different ones to advertise - but echoes back a genuinely
     registered username as-is, since that names a distinct identity."""
+    username = _address_name(username)
     if _known_username(username):
         return await _mint_address_response(req, settings.username)
     if _registered_username_branch(username) is not None:
         return await _mint_address_response(req, username)
-    raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
+    raise HTTPException(HTTPStatus.NOT_FOUND, "unknown user")
 
 
 async def _pay_callback(
@@ -955,10 +1030,9 @@ async def _pay_callback(
 
     `comment` is REQUIRED for the fixed identity (`branch` is None), same
     as ever - but for a registered username it is IGNORED: this mint
-    always derives the next unused note key on that username's own
-    registered branch itself (NoteStore.claim_next_index) and credits the
-    note under it (25.md's Seed & derivation) - no WALLET involvement
-    needed at receive time at all. Honoring a payer-supplied output there
+    credits the next unused note of that username's share itself, picked
+    when the invoice settles (NoteStore.settle_mint, LUD-26's Crediting) -
+    no WALLET involvement needed at receive time at all. Honoring a payer-supplied output there
     would mint the payment to whoever named it rather than the address
     owner (and a human message that happened to be 64 hex chars would
     lock it behind a preimage nobody holds), so get_lnaddress doesn't
@@ -998,15 +1072,13 @@ async def _pay_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, problem)
         zap_request = nostr
 
+    note_id: str | None = None
     if branch is not None:
-        # registered username: any comment is ignored - always auto-mint on
-        # this username's own branch (see this function's own docstring)
-        branch_point, chain_code = branch[:32], branch[32:]
+        # registered username: any comment is ignored - the note is the
+        # share's next unused one, picked when this invoice settles (see
+        # NoteStore.settle_mint), never now, so an unpaid invoice leaves no
+        # unused index behind (LUD-26's Crediting)
         assert username is not None
-        note_id, _ = notes.claim_next_index(
-            username,
-            lambda i: derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, i).hex(),
-        )
     else:
         decoded = spend.decode_note(comment) if comment is not None else None
         if decoded is None:
@@ -1044,6 +1116,7 @@ async def _pay_callback(
             net_amount_msat,
             note_id,
             zap_request=zap_request,
+            username=username if branch is not None else None,
         )
     except ValueError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
@@ -1070,10 +1143,19 @@ async def get_pay_callback(
     return await _pay_callback(req, amount, comment, nostr, username=None, branch=None)
 
 
-@router.get("/p/{username}", tags=["lnurlcash"], response_model=LnurlPayActionResponse | LnurlErrorResponse)
+@router.get(
+    "/p/{username}",
+    tags=["lnurlcash"],
+    response_model=LnurlPayActionResponse | InternalTransferResponse | LnurlErrorResponse,
+)
 async def get_pay_callback_for_username(
-    req: Request, username: str, amount: int, comment: str | None = None, nostr: str | None = None
-) -> LnurlPayActionResponse:
+    req: Request,
+    username: str,
+    amount: int,
+    comment: str | None = None,
+    nostr: str | None = None,
+    k1: str | None = None,
+) -> LnurlPayActionResponse | InternalTransferResponse:
     """LUD-06 callback for a cx1-registered Lightning Address
     (get_lnaddress's own callback for a registered `username`, never a
     payer's choice to redirect elsewhere - a request naming a `username`
@@ -1081,12 +1163,50 @@ async def get_pay_callback_for_username(
     else). Declared after GET /p/cb above so an exact match on that
     literal path is always tried first - Starlette resolves routes in
     registration order, and `{username}` would otherwise happily capture
-    the literal string "cb" too. See _pay_callback for the shared logic."""
-    username = username.lower()
+    the literal string "cb" too. See _pay_callback for the shared logic.
+
+    With a `k1` in place of an invoice request, this is LUD-26's internal
+    transfer instead (see _internal_transfer)."""
+    username = _address_name(username)
     branch_hex = _registered_username_branch(username)
-    if branch_hex is None:
-        raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
+    if branch_hex is None or _known_username(username):
+        raise HTTPException(HTTPStatus.NOT_FOUND, "unknown user")
+    if k1 is not None:
+        return await _internal_transfer(username, amount, k1)
     return await _pay_callback(req, amount, comment, nostr, username=username, branch=bytes.fromhex(branch_hex))
+
+
+async def _internal_transfer(username: str, amount: int, k1: str) -> InternalTransferResponse:
+    """LUD-26's internal transfer: a WALLET holding a note on this mint pays
+    a registered Lightning Address with the note itself. Handled as a
+    rotate whose output this mint picks - verified like any spend, a retry
+    answered as the first - it burns the note and credits its full value,
+    free of fees, to the share's next unused note, which the payer never
+    learns. `amount` MUST be the note's full value, within the address's
+    sendable range: a payer splits off the exact amount first."""
+    if amount < _min_sendable_msat() or amount > settings.max_sendable_msat:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Amount outside what this address accepts.")
+    try:
+        note_id, amount_msat, spent, pending = await _verified_note(k1)
+    except _Rejected as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, exc.reason)
+    burn = notes.find_burn([note_id])
+    if burn is not None and notes.burn_recipient([note_id]) == username and burn[2] == amount:
+        return InternalTransferResponse()
+    if spent:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "already in use")
+    if pending:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
+    if amount != amount_msat:
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST, f"amount must be the note's full value, {amount_msat} msat - split it first."
+        )
+    try:
+        credited = notes.transfer_to_username([note_id], username, amount, _share_note_id)
+    except (ValueError, PendingNoteError, OutputCollisionError) as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
+    logging.info(f"TRANSFER {note_id} -> {username}: {credited} {amount} msat")
+    return InternalTransferResponse()
 
 
 async def _verify_response(
@@ -1157,11 +1277,13 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
 
 
-async def _certificate(note_id_hex: str, amount_msat: int, funding_source: LightningBackendConfig) -> str | None:
+async def _certificate(
+    note_id_hex: str, amount_msat: int, funding_source: LightningBackendConfig, domain: str
+) -> str | None:
     """This mint's Offline-verification certificate for a note, `cs1<...>`
-    over (Q, amount) - every note has a public Q, so every note gets one.
-    None if signing isn't available right now (see sign_note)."""
-    raw = await sign_note(note_id_hex, amount_msat, funding_source)
+    over (domain, Q, amount) - every note has a public Q, so every note gets
+    one. None if signing isn't available right now (see sign_note)."""
+    raw = await sign_note(note_id_hex, domain, amount_msat, funding_source)
     if raw is None:
         return None
     return bech32m.encode_cs1(amount_msat, bytes.fromhex(raw))
@@ -1193,7 +1315,7 @@ async def get_withdraw(
     `cp1`, or a bearer note's hex `h`, accepted here in place of `k1` and
     ONLY here, never at /w/cb. The response then omits `k1` (see
     LnurlWithdrawResponse). An unknown `p` gets the same response as an
-    unknown `k1`; a retained spent note returns "Note already spent." with
+    unknown `k1`; a retained spent note returns "already in use" with
     either lookup form.
 
     `amount` is accepted only because a note's URL encodes a
@@ -1232,8 +1354,9 @@ async def get_withdraw(
         amount_msat, _, spent, _ = record
     # a note names its own spent state: disclosed, while keeping the spend
     # itself off the wire
+    # what a LUD-26 recovery scan counts as a used index (LUD-25)
     if spent:
-        raise HTTPException(HTTPStatus.BAD_REQUEST, "Note already spent.")
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "already in use")
     # a note reserved by an in-flight melt (NoteStore.mark_pending) must
     # not be advertised as withdrawable: every mutating callback rejects
     # it with reason "pending" per spec, so an informational endpoint
@@ -1247,7 +1370,7 @@ async def get_withdraw(
     # spoofable via a plain Host header even behind a proxy) - same as
     # get_lnaddress/get_pay_callback
     base, host = settings.public_base_url_and_host(str(req.base_url))
-    sig = await _certificate(note_id, amount_msat, settings.funding_source())
+    sig = await _certificate(note_id, amount_msat, settings.funding_source(), _domain(req))
     return LnurlWithdrawResponse(
         callback=f"{base}/w/cb",
         k1=k1,
@@ -1360,16 +1483,17 @@ async def get_withdraw_callback(
             recorded_amount = amount1_msat if recorded_p2 is not None else None
             if recorded_p1 == p1_id and recorded_p2 == p2_id and recorded_amount == amount:
                 funding_source = settings.funding_source()
-                sig = await _certificate(recorded_p1, amount1_msat, funding_source)
+                sig = await _certificate(recorded_p1, amount1_msat, funding_source, _domain(req))
                 sig2 = (
-                    await _certificate(recorded_p2, amount2_msat, funding_source)
+                    await _certificate(recorded_p2, amount2_msat, funding_source, _domain(req))
                     if recorded_p2 is not None and amount2_msat is not None
                     else None
                 )
                 return WithdrawSuccessResponse(c=sig, c2=sig2)
 
+    # a burned note, or a retry naming other outputs (LUD-25)
     if any(spent for _, _, spent, _ in verified):
-        raise HTTPException(HTTPStatus.BAD_REQUEST, _INVALID_K1)
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "already in use")
     values = [amount_msat for _, amount_msat, _, _ in verified]
     total_msat = sum(values)
 
@@ -1477,8 +1601,8 @@ async def get_withdraw_callback(
             notes.swap(note_ids, [p1_id, p2_id], [amount, change_amount])
             funding_source = settings.funding_source()
             return WithdrawSuccessResponse(
-                c=await _certificate(p1_id, amount, funding_source),
-                c2=await _certificate(p2_id, change_amount, funding_source),
+                c=await _certificate(p1_id, amount, funding_source, _domain(req)),
+                c2=await _certificate(p2_id, change_amount, funding_source, _domain(req)),
             )
 
         # rotate is a merge of one note - the refund below is exactly 0
@@ -1490,7 +1614,9 @@ async def get_withdraw_callback(
         refund = (len(note_ids) - 1) * settings.base_fee_msat
         merged_amount = total_msat + refund
         notes.swap(note_ids, [p1_id], [merged_amount])
-        return WithdrawSuccessResponse(c=await _certificate(p1_id, merged_amount, settings.funding_source()))
+        return WithdrawSuccessResponse(
+            c=await _certificate(p1_id, merged_amount, settings.funding_source(), _domain(req))
+        )
     except OutputCollisionError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
     except PendingNoteError:

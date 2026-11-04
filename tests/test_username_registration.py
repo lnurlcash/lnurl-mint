@@ -1,748 +1,525 @@
-"""LUD-25 Seed & derivation's cx1 registration (router.py's
-POST/DELETE /p/{username}): a WALLET claims a Lightning Address username
-against its own watch-only branch, and this mint auto-mints cp1 notes off
-it directly. Every register/unregister call needs an ownership-proof
-signature - a fresh claim over the branch being submitted right now, an
-overwrite or delete over whichever branch is already on file (see
-router._owns_branch and upsert_registered_username's own docstring for why
-those differ) - there is no proof-free case."""
+"""LUD-26 Lightning Addresses (router.py's POST/PUT/DELETE
+/.well-known/lnurlp/{username}): a WALLET registers one of its shares - an
+extended public key, cx1 = chain_code || P - at the very address it
+claims, and this mint auto-mints a note on the share's next unused key for
+every payment there. Every registration, update and unregistration is
+proven by a share's own key; a registration is never overwritten, and a
+share is never accepted twice."""
 
 import json
 from hashlib import sha256
 from os import urandom
+from pathlib import Path
 
 import bech32 as bech32_pkg
 from coincurve import PrivateKey
 from fastapi.testclient import TestClient
 
 from lnurl_mint import bech32m, derivation
+from lnurl_mint import router as router_module
 from lnurl_mint.config import settings
-from lnurl_mint.db import notes
+from lnurl_mint.db import NoteStore, notes
 from lnurl_mint.signing import verify_register_signature
-from tests.conftest import FakeNode, sign_schnorr_message
+from tests.conftest import (
+    FakeNode,
+    address_proof,
+    fresh_username,
+    make_share,
+    register_share,
+    settle_polled,
+    share_note,
+)
 
-# secp256k1 group order - needed to mirror derive_pubkey's BIP-340 x-only
-# tweak on the PRIVATE key side (see _ownership_sig).
-_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-
-# a well-formed-length but cryptographically meaningless signature - used
-# wherever a test needs *some* sig value present (sig is a required query
-# param on every register/unregister call now) but wants the ownership
-# check itself to fail, not FastAPI's own missing-parameter validation.
-_BOGUS_SIG = "00" * 64
-
-# matches conftest.py's BASE_URL ("http://testserver") host - router.py
-# folds settings.public_base_url_and_host(req.base_url)'s host into the
-# signed message (see _ownership_sig), so every proof here must match it.
-_DOMAIN = "testserver"
+VECTORS = Path(__file__).parent / "vectors"
 
 
-def _branch() -> tuple[PrivateKey, bytes, bytes, str]:
-    """A fresh (p, P, chain_code, cx1) - a WALLET's watch-only branch
-    export, standing in for a real BIP32 seed derivation without needing
-    one (see derivation.derive_pubkey, which only needs a valid x-only P,
-    not how it was produced). `p`, the private scalar behind P, is kept
-    too - _ownership_sig needs it to derive the branch's own index-0
-    secret."""
-    p = PrivateKey()
-    branch_point = p.public_key.format(compressed=True)[1:]
-    chain_code = urandom(32)
-    return p, branch_point, chain_code, bech32m.encode_cx1(branch_point + chain_code)
+def _address(username: str) -> str:
+    return f"/.well-known/lnurlp/{username}"
 
 
-def _ownership_sig(
-    p: PrivateKey, branch_point: bytes, chain_code: bytes, action: str, username: str, domain: str = _DOMAIN
-) -> str:
-    """A valid ownership-proof signature (router._owns_branch) for the
-    branch (branch_point, chain_code): derive_pubkey tweaks the PUBLIC key
-    assuming the even-y (lift_x) representation of `branch_point`, so the
-    private-key side must first negate `p`'s scalar whenever `p`'s own
-    full pubkey has odd y (PublicKeyXOnly always represents the even-y
-    point), then add the same tweak - this recovers sk_0, the branch's own
-    PURPOSE_WALLET index-0 secret (the same key claim_next_index would
-    NEVER hand a note out under - that's PURPOSE_LIGHTNING_ADDRESS, a
-    separate counter on this same branch). Signed over
-    "LNURLcash:<action>:<domain>:<username>" (25.md's Seed & derivation; a
-    different message than a note's own ck1 - see signing.py), a plain
-    BIP-340 Schnorr signature (post "actually use schnorr sigs..." -
-    ../luds commit da07aa0), no pk attached since SERVICE derives sk0's
-    public half itself from cx1. `action` is "register" (a fresh claim OR
-    an overwrite - upsert_registered_username checks it against a
-    different branch depending on which) or "unregister" (matching
-    delete_registered_username) - the two are never interchangeable.
-    `domain` (_DOMAIN here, matching the TestClient's own host - see
-    router._owns_branch) stops a proof from replaying against a different
-    mint. `username` must already be lowercase: the endpoint lowercases it
-    before ever checking a signature, so a sig signed over a mixed-case
-    username would simply never match. Signs sha256(message), a 32-byte
-    digest, not the raw message itself - see signing._schnorr_digest for
-    why."""
-    d = p.to_int()
-    if p.public_key.format(compressed=True)[0] == 0x03:
-        d = _N - d
-    tweak = int.from_bytes(
-        derivation.tagged_hash(
-            b"LNURLcash/derive",
-            branch_point + chain_code + derivation.PURPOSE_WALLET.to_bytes(4, "big") + (0).to_bytes(4, "big"),
-        ),
-        "big",
-    )
-    sk0 = PrivateKey.from_int((d + tweak) % _N)
-    digest = sha256(f"LNURLcash:{action}:{domain}:{username}".encode()).digest()
-    return sign_schnorr_message(sk0, digest).hex()
+def _post(client: TestClient, username: str, **form: str) -> dict:
+    return client.post(_address(username), data=form).json()
+
+
+def _put(client: TestClient, username: str, **form: str) -> dict:
+    return client.put(_address(username), data=form).json()
+
+
+def _delete(client: TestClient, username: str, **form: str) -> dict:
+    return client.request("DELETE", _address(username), data=form).json()
+
+
+def _reason(response: dict) -> str:
+    assert response["status"] == "ERROR", response
+    return response["reason"]
 
 
 def _npub() -> tuple[bytes, str]:
-    """A fresh (pubkey, npub) pair - NIP-19's classic (non-bech32m) bech32
-    encoding, built straight off the `bech32` package rather than
-    lnurl_mint.bech32m (whose encode() is bech32m-only, wrong checksum for
-    an npub - see bech32m.decode_npub)."""
+    """A fresh (pubkey, npub) pair - NIP-19's classic (non-bech32m) bech32."""
     pubkey = PrivateKey().public_key.format(compressed=True)[1:]
     data = bech32_pkg.convertbits(pubkey, 8, 5, True)
     assert data is not None
     return pubkey, bech32_pkg.bech32_encode("npub", data)
 
 
-def _payment_hash(node: FakeNode) -> str:
-    return sha256(node.last_preimage).hexdigest()
-
-
 def _note_value(client: TestClient, note_id_hex: str) -> int | None:
-    """Value of the outstanding note with id `note_id_hex` - via the
-    informational GET's `p` lookup (LUD-25's "Checking a note without
-    exposing it"), which also triggers this mint's lazy
-    settle-on-first-lookup materialization (see NoteStore.settle_mint) -
-    unlike poking NoteStore.note_amount directly, this is what actually
-    makes a freshly settled mint invoice become a queryable note."""
+    """Value of the outstanding note `note_id_hex`, via the informational
+    GET's `p` lookup."""
     data = client.get(f"/w?p={bech32m.encode_cp1(bytes.fromhex(note_id_hex))}").json()
     return data.get("maxWithdrawable")
 
 
+def _net(amount_msat: int) -> int:
+    return amount_msat - router_module._mint_fee_msat(amount_msat)
+
+
+def _pay(client: TestClient, node: FakeNode, username: str, amount_msat: int = 21_000) -> str:
+    """Request an invoice from `username`'s address; its payment hash."""
+    callback = client.get(_address(username)).json()["callback"]
+    resp = client.get(f"{callback}?amount={amount_msat}").json()
+    assert resp.get("pr"), resp
+    return sha256(node.last_preimage).hexdigest()
+
+
+# ---- registering ----
+
+
 def test_register_claims_a_username(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "alice")
-    resp = client.post(f"/p/alice?cx1={cx1}&sig={sig}")
-    assert resp.json() == {"status": "OK"}
-    assert notes.username_branch("alice") == bech32m.decode_cx1(cx1).hex()
+    name = fresh_username("alice")
+    _, cx1 = register_share(client, name)
+    share = bech32m.decode_cx1(cx1)
+    assert share is not None
+    assert notes.username_branch(name) == share.hex()
 
 
-def test_register_rejects_a_proof_signed_for_a_different_domain(client: TestClient):
-    """A proof genuinely signed for some OTHER mint ("other-mint.example")
-    must NOT verify against this one (host "testserver", per _DOMAIN) -
-    the cross-mint replay _owns_branch's own `domain` binding exists to
-    close (a bare cx1/sig pair is otherwise fully portable, and any mint
-    that ever legitimately received one from a WALLET could otherwise
-    replay it verbatim against every other mint's own /p/{username}).
-    settings.public_base_url_and_host deliberately never trusts a
-    request's own Host header for this (see its own docstring), so this
-    signs for a different domain directly rather than spoofing Host."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "zoe", domain="other-mint.example")
-    resp = client.post(f"/p/zoe?cx1={cx1}&sig={sig}")
-    assert resp.json()["status"] == "ERROR"
-    assert notes.username_branch("zoe") is None
+def test_a_proof_proves_one_action_name_cx1_and_domain_only(client: TestClient):
+    """A proof binds the action, the domain (so another mint cannot replay
+    it here), the lowercased username and the cx1 being put on file."""
+    name = fresh_username("zoe")
+    p, cx1 = make_share()
+    _, other_cx1 = make_share()
+    for sig in [
+        address_proof(p, "register", name, cx1, domain="other-mint.example"),
+        address_proof(p, "unregister", name),
+        address_proof(p, "update", name, cx1),
+        address_proof(p, "register", fresh_username("bob"), cx1),
+        address_proof(p, "register", name, other_cx1),
+        address_proof(PrivateKey(), "register", name, cx1),
+        "00" * 64,
+        "not hex",
+    ]:
+        assert _reason(_post(client, name, cx1=cx1, sig=sig)) == "Invalid ownership signature."
+    assert notes.username_branch(name) is None
 
 
-def test_register_and_unregister_proofs_match_lud25_spec_test_vector_2():
-    """Cross-implementation check against 25.md's own published "Test
-    vector 2: Seed & derivation (branch root has even-y P) + LN address
-    registration proof" - sk_0/pk_0 are test vector 2's own (SERVICE domain
-    cash.example.com; test_derivation.py's test_matches_lud25_spec_test_vector_2
-    already confirms this pk_0 is what derive_pubkey produces for that
-    branch at index 0). Unlike _ownership_sig's other tests here, which
-    only self-check against randomly generated branches, this asserts
-    verify_register_signature against the literal signature bytes 25.md
-    publishes - domain-bound since ../luds commit (fix: bind SERVICE
-    domain into the registration proof), since a bare cx1 is otherwise
-    domain-agnostic and a proof over it alone replays against any SERVICE
-    that will accept it, not just the one it was meant for."""
-    pk_0 = bytes.fromhex("01fee34e378bf66de6afa1bfa6e30f5c89551fd92bc1b089dca93c52b7ab61bc")
-    domain = "cash.example.com"
-    register_sig = (
-        "9169a81db3372d8bb8a080f271f8036192131d4ed02596c0baa181613fdc5d6e17b3230b01f510a759fdb6c46b53671e5"
-        "7678f57ac0a6a3deb6300761225adc7"
-    )
-    unregister_sig = (
-        "fcc6a96f560d6505bfc475d8c2d4383047f2ece6593412af9b2834913af60f108b6e194cef31c377a23a051f8c80c1660e"
-        "fc2313b7876a2f80bc1f0f423c7835"
-    )
-    assert verify_register_signature(pk_0, register_sig, "register", domain, "alice")
-    assert verify_register_signature(pk_0, unregister_sig, "unregister", domain, "alice")
-
-    # a register proof is never valid as an unregister one (or vice versa)
-    # - action is bound into the signed digest, not just checked alongside it
-    assert not verify_register_signature(pk_0, register_sig, "unregister", domain, "alice")
-    assert not verify_register_signature(pk_0, unregister_sig, "register", domain, "alice")
-
-    # nor does either proof replay against a different SERVICE domain -
-    # the bug this vector's own signatures changed to close
-    assert not verify_register_signature(pk_0, register_sig, "register", "mint.example", "alice")
-    assert not verify_register_signature(pk_0, unregister_sig, "unregister", "mint.example", "alice")
+def test_register_needs_a_cx1_and_a_signature(client: TestClient):
+    name = fresh_username("amy")
+    _, cx1 = make_share()
+    assert _reason(_post(client, name, cx1=cx1)) == "Missing sig."
+    assert _reason(_post(client, name, sig="00" * 64)) == "Missing cx1."
 
 
-def test_register_without_a_signature_rejected(client: TestClient):
-    """`sig` is a required parameter now - even a fresh, unclaimed
-    username is never proof-free (25.md's Seed & derivation)."""
-    _, _, _, cx1 = _branch()
-    resp = client.post(f"/p/quentin?cx1={cx1}")
-    assert resp.json()["status"] == "ERROR"
-    assert notes.username_branch("quentin") is None
-
-
-def test_register_fresh_claim_with_wrong_signature_rejected(client: TestClient):
-    """A fresh claim's proof must be over the NEW cx1 being submitted -
-    signed by any OTHER key, it's rejected outright, exactly like an
-    overwrite's own wrong-signature case."""
-    _, _, _, cx1 = _branch()
-    wrong_p, wrong_branch_point, wrong_chain_code, _ = _branch()
-    sig = _ownership_sig(wrong_p, wrong_branch_point, wrong_chain_code, "register", "walter")
-    resp = client.post(f"/p/walter?cx1={cx1}&sig={sig}")
-    assert resp.json()["status"] == "ERROR"
-    assert notes.username_branch("walter") is None
-
-
-def test_overwrite_without_ownership_proof_rejected(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "bob")
-    assert client.post(f"/p/bob?cx1={cx1}&sig={sig}").json()["status"] == "OK"
-    _, _, _, cx1_2 = _branch()
-    resp = client.post(f"/p/bob?cx1={cx1_2}&sig={_BOGUS_SIG}")
-    assert resp.json()["status"] == "ERROR"
-    # rejected outright: the original branch is untouched
-    assert notes.username_branch("bob") == bech32m.decode_cx1(cx1).hex()
-
-
-def test_overwrite_with_wrong_signature_rejected(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig0 = _ownership_sig(p, branch_point, chain_code, "register", "carol")
-    client.post(f"/p/carol?cx1={cx1}&sig={sig0}")
-    wrong_p, _, _, _ = _branch()
-    sig = _ownership_sig(wrong_p, wrong_p.public_key.format(compressed=True)[1:], urandom(32), "register", "carol")
-    _, _, _, cx1_2 = _branch()
-    resp = client.post(f"/p/carol?cx1={cx1_2}&sig={sig}")
-    assert resp.json()["status"] == "ERROR"
-    assert notes.username_branch("carol") == bech32m.decode_cx1(cx1).hex()
-
-
-def test_overwrite_with_valid_ownership_proof_replaces_the_branch(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "dana")
-    client.post(f"/p/dana?cx1={cx1}&sig={sig}")
-    # same key both times: the fresh claim above proved control of `cx1`
-    # itself, this overwrite proves continued control of that SAME branch
-    # (still on file), a different check that happens to need an
-    # identical signature only because nothing about the branch changed
-    _, _, _, cx1_2 = _branch()
-    resp = client.post(f"/p/dana?cx1={cx1_2}&sig={sig}")
-    assert resp.json() == {"status": "OK"}
-    assert notes.username_branch("dana") == bech32m.decode_cx1(cx1_2).hex()
-
-
-def test_overwrite_omitting_npub_clears_it(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    _, npub = _npub()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "edna")
-    client.post(f"/p/edna?cx1={cx1}&npub={npub}&sig={sig}")
-    assert client.get("/.well-known/nostr.json?name=edna").json()["names"]
-
-    resp = client.post(f"/p/edna?cx1={cx1}&sig={sig}")
-    assert resp.json() == {"status": "OK"}
-    assert client.get("/.well-known/nostr.json?name=edna").json() == {"names": {}}
-
-
-def test_register_rejects_reserved_username(client: TestClient):
-    _, _, _, cx1 = _branch()
-    assert client.post(f"/p/{settings.username}?cx1={cx1}&sig={_BOGUS_SIG}").json()["status"] == "ERROR"
-    assert client.post(f"/p/_?cx1={cx1}&sig={_BOGUS_SIG}").json()["status"] == "ERROR"
-
-
-def test_register_rejects_malformed_cx1(client: TestClient):
-    resp = client.post(f"/p/finn?cx1=notbech32m&sig={_BOGUS_SIG}")
-    assert resp.json()["status"] == "ERROR"
-
-
-def test_register_with_npub_serves_nip05(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    pubkey, npub = _npub()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "mallory")
-    resp = client.post(f"/p/mallory?cx1={cx1}&npub={npub}&sig={sig}")
+def test_register_reads_its_parameters_from_the_form_body(client: TestClient):
+    """LUD-26 sends them form-encoded, so a browser WALLET's POST needs no
+    CORS preflight, and they stay out of a query string a log might keep."""
+    name = fresh_username("form")
+    p, cx1 = make_share()
+    body = f"cx1={cx1}&sig={address_proof(p, 'register', name, cx1)}"
+    resp = client.post(_address(name), content=body, headers={"content-type": "application/x-www-form-urlencoded"})
     assert resp.json() == {"status": "OK"}
 
-    nip05 = client.get("/.well-known/nostr.json?name=mallory").json()
-    assert nip05 == {"names": {"mallory": pubkey.hex()}}
 
-
-def test_register_without_npub_has_no_nip05_name(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "nora")
-    client.post(f"/p/nora?cx1={cx1}&sig={sig}")
-    nip05 = client.get("/.well-known/nostr.json?name=nora").json()
-    assert nip05 == {"names": {}}
-
-
-def test_register_rejects_malformed_npub(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "oscarnpub")
-    resp = client.post(f"/p/oscarnpub?cx1={cx1}&npub=notanpub&sig={sig}")
-    assert resp.json()["status"] == "ERROR"
-    assert notes.username_branch("oscarnpub") is None
-
-
-def test_nip05_unknown_name_returns_empty_names(client: TestClient):
-    assert client.get("/.well-known/nostr.json?name=nobody").json() == {"names": {}}
-
-
-def test_nip05_with_no_name_returns_empty_names(client: TestClient):
-    """Never dumps the whole directory - only the one name asked about,
-    and no `name` at all asks about none."""
-    p, branch_point, chain_code, cx1 = _branch()
-    _, npub = _npub()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "petra")
-    client.post(f"/p/petra?cx1={cx1}&npub={npub}&sig={sig}")
-    assert client.get("/.well-known/nostr.json").json() == {"names": {}}
-
-
-def test_nip05_lookup_is_case_insensitive_but_echoes_the_queried_name(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    pubkey, npub = _npub()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "quinn")
-    client.post(f"/p/Quinn?cx1={cx1}&npub={npub}&sig={sig}")
-    nip05 = client.get("/.well-known/nostr.json?name=QUINN").json()
-    assert nip05 == {"names": {"QUINN": pubkey.hex()}}
-
-
-def test_nip05_hidden_while_username_registration_disabled(client: TestClient, monkeypatch):
-    p, branch_point, chain_code, cx1 = _branch()
-    _, npub = _npub()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "ray")
-    client.post(f"/p/ray?cx1={cx1}&npub={npub}&sig={sig}")
-    monkeypatch.setattr(settings, "username_registration_enabled", False)
-    assert client.get("/.well-known/nostr.json?name=ray").json() == {"names": {}}
-
-
-def test_nip05_404s_while_nip05_disabled(client: TestClient, monkeypatch):
-    p, branch_point, chain_code, cx1 = _branch()
-    _, npub = _npub()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "sam")
-    client.post(f"/p/sam?cx1={cx1}&npub={npub}&sig={sig}")
-    monkeypatch.setattr(settings, "nip05_enabled", False)
-    resp = client.get("/.well-known/nostr.json?name=sam")
-    assert resp.json() == {"status": "ERROR", "reason": "Not found"}
-
-
-def test_registration_rejects_npub_while_nip05_disabled(client: TestClient, monkeypatch):
-    monkeypatch.setattr(settings, "nip05_enabled", False)
-    p, branch_point, chain_code, cx1 = _branch()
-    _, npub = _npub()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "tina")
-    resp = client.post(f"/p/tina?cx1={cx1}&npub={npub}&sig={sig}")
-    assert resp.json() == {"status": "ERROR", "reason": "npub registration (NIP-05) is disabled on this mint."}
-    assert notes.username_branch("tina") is None
-
-
-def test_registration_without_npub_still_works_while_nip05_disabled(client: TestClient, monkeypatch):
-    monkeypatch.setattr(settings, "nip05_enabled", False)
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "uma")
-    resp = client.post(f"/p/uma?cx1={cx1}&sig={sig}")
-    assert resp.json() == {"status": "OK"}
-    assert notes.username_branch("uma") is not None
-
-
-def test_unregistered_username_404s(client: TestClient):
-    resp = client.get("/.well-known/lnurlp/nobody")
-    assert resp.json() == {"status": "ERROR", "reason": "Unknown user."}
-
-
-def test_registered_lnaddress_callback_carries_username(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "dave")
-    client.post(f"/p/dave?cx1={cx1}&sig={sig}")
-    data = client.get("/.well-known/lnurlp/dave").json()
-    assert data["callback"] == "http://testserver/p/dave"
-    assert data["tag"] == "payRequest"
-
-
-def test_registered_lnaddress_metadata_advertises_xpub_for_internal_transfers(client: TestClient):
-    """25.md's Internal mint transfers: a registered username's payRequest
-    metadata carries its own `cx1`, so a payer's WALLET already holding a
-    note on this mint can skip Lightning entirely - deriving the next note
-    key itself rather than paying an invoice."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "gina")
-    client.post(f"/p/gina?cx1={cx1}&sig={sig}")
-    metadata = json.loads(client.get("/.well-known/lnurlp/gina").json()["metadata"])
-    assert ["text/cpub", f"{cx1}:0"] in metadata
-
-
-def test_fixed_identity_lnaddress_metadata_has_no_xpub(client: TestClient):
-    """This mint's own fixed identity has no watch-only branch to advertise
-    - only a registered (cx1-backed) username does."""
-    metadata = json.loads(client.get(f"/.well-known/lnurlp/{settings.username}").json()["metadata"])
-    assert not any(entry[0] == "text/cpub" for entry in metadata)
-
-
-def test_xpub_index_hint_advances_after_an_automint(client: TestClient, node: FakeNode):
-    """claim_next_index reserves and persists past the index it hands out
-    at callback (invoice-creation) time, not at settlement - so the
-    advertised hint must already reflect that on the very next lookup,
-    even before this particular invoice is paid."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "hana")
-    client.post(f"/p/hana?cx1={cx1}&sig={sig}")
-    lnaddress = client.get("/.well-known/lnurlp/hana").json()
-    metadata = json.loads(lnaddress["metadata"])
-    assert ["text/cpub", f"{cx1}:0"] in metadata
-
-    pay_response = client.get(f"{lnaddress['callback']}?amount=5000")
-    assert pay_response.json().get("pr")
-
-    metadata = json.loads(client.get("/.well-known/lnurlp/hana").json()["metadata"])
-    assert ["text/cpub", f"{cx1}:1"] in metadata
-
-
-def test_internal_transfer_skips_lightning_via_rotate(client: TestClient, node: FakeNode, mint_note):
-    """The whole point of Internal mint transfers: a payer already holding
-    a note on this mint reads `ivan`'s `cx1`/index hint off his payRequest
-    metadata and lands a note directly on his branch via an ordinary
-    rotate - never paying a Lightning invoice to `ivan`'s address at all."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "ivan")
-    client.post(f"/p/ivan?cx1={cx1}&sig={sig}")
-    metadata = json.loads(client.get("/.well-known/lnurlp/ivan").json()["metadata"])
-    xpub_entry = next(entry for entry in metadata if entry[0] == "text/cpub")
-    advertised_cx1, index_hint = xpub_entry[1].rsplit(":", 1)
-    assert advertised_cx1 == cx1
-    decoded_branch = bech32m.decode_cx1(advertised_cx1)
-    assert decoded_branch == branch_point + chain_code
-
-    pk_i = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, int(index_hint))
-    cp1 = bech32m.encode_cp1(pk_i)
-
-    # the sender already holds an ordinary (legacy) note on this mint -
-    # rotating it directly onto ivan's derived key moves the value without
-    # ever touching ivan's own payRequest/invoice
-    k1 = mint_note(5000)
-    resp = client.get(f"/w/cb?k1={k1}&p1={cp1}")
-    assert resp.json()["status"] == "OK"
-    assert _note_value(client, pk_i.hex()) == 5000
-
-    # ivan's own advertised next_index is untouched by this - it's only a
-    # hint, never reserved by anything other than his own auto-mint path
-    metadata = json.loads(client.get("/.well-known/lnurlp/ivan").json()["metadata"])
-    assert ["text/cpub", f"{cx1}:{index_hint}"] in metadata
-
-
-def test_internal_transfer_to_a_stale_index_is_rejected_like_any_collision(
-    client: TestClient, node: FakeNode, mint_note
-):
-    """`i` is only a hint (25.md): if two senders race for the same
-    advertised index, the second one must fail cleanly, exactly like any
-    other already-in-use p1, never double-credit or overwrite."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "jack")
-    client.post(f"/p/jack?cx1={cx1}&sig={sig}")
-    pk0 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0)
-    cp1 = bech32m.encode_cp1(pk0)
-
-    first_k1 = mint_note(3000)
-    assert client.get(f"/w/cb?k1={first_k1}&p1={cp1}").json()["status"] == "OK"
-
-    second_k1 = mint_note(2000)
-    resp = client.get(f"/w/cb?k1={second_k1}&p1={cp1}")
-    assert resp.json() == {"status": "ERROR", "reason": "already in use"}
-    # the first transfer's note is untouched, the second sender's note
-    # was never burned
-    assert _note_value(client, pk0.hex()) == 3000
-    assert client.get(f"/w?k1={second_k1}").json()["maxWithdrawable"] == 2000
-
-
-def test_paying_registered_address_with_no_comment_automints(client: TestClient, node: FakeNode):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "erin")
-    client.post(f"/p/erin?cx1={cx1}&sig={sig}")
-
-    lnaddress = client.get("/.well-known/lnurlp/erin").json()
-    pay_response = client.get(f"{lnaddress['callback']}?amount=5000")
-    assert pay_response.json().get("pr"), pay_response.text
-    node.settled.add(_payment_hash(node))
-
-    expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
-    assert _note_value(client, expected_id) == 5000
-
-
-def test_hex_lookup_of_an_automint_key_leaves_the_note_alone(client: TestClient, node: FakeNode):
-    """A 64-hex `p` is a bearer note's short form: it names that bearer note's
-    Q, never the cp1 note stored under the same 32 bytes."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "hexa")
-    client.post(f"/p/hexa?cx1={cx1}&sig={sig}")
-
-    lnaddress = client.get("/.well-known/lnurlp/hexa").json()
-    client.get(f"{lnaddress['callback']}?amount=5000")
-    node.settled.add(_payment_hash(node))
-
-    expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
-    assert client.get(f"/w?p={expected_id}").json()["reason"] == "Unknown note."
-    assert _note_value(client, expected_id) == 5000
-
-
-def test_second_automint_payment_uses_the_next_index(client: TestClient, node: FakeNode):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "frank")
-    client.post(f"/p/frank?cx1={cx1}&sig={sig}")
-    lnaddress = client.get("/.well-known/lnurlp/frank").json()
-
-    for _ in range(2):
-        pay_response = client.get(f"{lnaddress['callback']}?amount=5000")
-        assert pay_response.json().get("pr")
-        node.settled.add(_payment_hash(node))
-
-    pk0 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
-    pk1 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 1).hex()
-    assert _note_value(client, pk0) == 5000
-    assert _note_value(client, pk1) == 5000
-
-
-def test_automint_skips_an_index_already_taken_by_a_manual_mint(client: TestClient, node: FakeNode):
-    """LUD-25 Seed & derivation's own race-avoidance paragraph: if index 0
-    is already outstanding (e.g. a WALLET's own pending rotate got there
-    first), the auto-mint path must skip to the next free index rather
-    than double-credit or collide."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "grace")
-    client.post(f"/p/grace?cx1={cx1}&sig={sig}")
-
-    pk0 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0)
-    manual = client.get(f"/p/cb?amount=1000&comment={bech32m.encode_cp1(pk0)}")
-    assert manual.json().get("pr")
-    node.settled.add(_payment_hash(node))
-    assert _note_value(client, pk0.hex()) == 1000
-
-    lnaddress = client.get("/.well-known/lnurlp/grace").json()
-    pay_response = client.get(f"{lnaddress['callback']}?amount=5000")
-    assert pay_response.json().get("pr")
-    node.settled.add(_payment_hash(node))
-
-    pk1 = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 1)
-    assert _note_value(client, pk1.hex()) == 5000
-
-
-def test_registered_username_does_not_advertise_comment_allowed(client: TestClient):
-    """A registered username always auto-mints on its own branch, so its
-    payRequest invites no comment - unlike the fixed identity, which
-    requires one."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "ivy")
-    client.post(f"/p/ivy?cx1={cx1}&sig={sig}")
-
-    assert "commentAllowed" not in client.get("/.well-known/lnurlp/ivy").json()
-    assert client.get(f"/.well-known/lnurlp/{settings.username}").json()["commentAllowed"] == 64
-
-
-def test_output_comment_is_ignored_for_registered_username(client: TestClient, node: FakeNode):
-    """A payer-supplied output (cp1 or bearer hash) must never redirect a
-    payment to a registered username away from the owner's own branch."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "henry")
-    client.post(f"/p/henry?cx1={cx1}&sig={sig}")
-    cp1 = bech32m.encode_cp1(PrivateKey().public_key.format(compressed=True)[1:])
-
-    for comment in (cp1, "ab" * 32):
-        pay_response = client.get("/p/henry", params={"amount": 5000, "comment": comment})
-        assert pay_response.json().get("pr"), pay_response.text
-        node.settled.add(_payment_hash(node))
-
-    assert _note_value(client, bech32m.decode_cp1(cp1).hex()) is None
-    for i in range(2):
-        expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, i).hex()
-        assert _note_value(client, expected_id) == 5000
-
-
-def test_ordinary_lud12_comment_automints_for_registered_username(client: TestClient, node: FakeNode):
-    """A payer's WALLET sending a plain human LUD-12 message (not a note
-    ref) must not block minting - it's ignored and the payment still
-    auto-mints on the username's own branch, same as no comment at all."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "lenny")
-    client.post(f"/p/lenny?cx1={cx1}&sig={sig}")
-    lnaddress = client.get("/.well-known/lnurlp/lenny").json()
-
-    pay_response = client.get(f"{lnaddress['callback']}?amount=5000&comment=gm!")
-    assert pay_response.json().get("pr"), pay_response.text
-    node.settled.add(_payment_hash(node))
-
-    expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
-    assert _note_value(client, expected_id) == 5000
-
-
-def test_empty_lud12_comment_automints_for_registered_username(client: TestClient, node: FakeNode):
-    """Wallets commonly send `comment=` when the payer leaves the optional
-    comment box empty. It must behave like an omitted comment."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "mabel")
-    client.post(f"/p/mabel?cx1={cx1}&sig={sig}")
-
-    pay_response = client.get("/p/mabel", params={"amount": 5000, "comment": ""})
-    assert pay_response.json().get("pr"), pay_response.text
-    node.settled.add(_payment_hash(node))
-
-    expected_id = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0).hex()
-    assert _note_value(client, expected_id) == 5000
-
-
-def test_username_registration_disabled_404s_register(client: TestClient, monkeypatch):
-    monkeypatch.setattr(settings, "username_registration_enabled", False)
-    _, _, _, cx1 = _branch()
-    resp = client.post(f"/p/iris?cx1={cx1}&sig={_BOGUS_SIG}")
-    assert resp.json() == {"status": "ERROR", "reason": "Not found"}
-
-
-def test_username_registration_disabled_hides_registered_address(client: TestClient, monkeypatch):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "jill")
-    client.post(f"/p/jill?cx1={cx1}&sig={sig}")
-    monkeypatch.setattr(settings, "username_registration_enabled", False)
-    resp = client.get("/.well-known/lnurlp/jill")
-    assert resp.json() == {"status": "ERROR", "reason": "Unknown user."}
+def test_register_rejects_reserved_and_malformed_usernames(client: TestClient):
+    """The mint's own names - its configured username, `_` and always
+    `mint`, where LUD-26 has a WALLET find the mint payRequest - and any
+    name with a `+`, which is a tag of another address."""
+    for name in [settings.username, "_", "mint", "MINT", "a+b", "x" * 33]:
+        p, cx1 = make_share()
+        resp = _post(client, name, cx1=cx1, sig=address_proof(p, "register", name.lower(), cx1))
+        assert _reason(resp) == "Invalid or reserved username.", name
+
+
+def test_register_rejects_a_malformed_or_superseded_cx1(client: TestClient):
+    name = fresh_username("cy")
+    p = PrivateKey()
+    point = p.public_key.format(compressed=True)
+    for cx1 in [
+        "notacx1",
+        bech32m.encode_cp1(point[1:]),
+        # the 64-byte x(P) || chain_code from before LUD-26
+        bech32m.encode_legacy_cx1(point[1:] + urandom(32)),
+        # a 65-byte payload whose P is no compressed point
+        bech32m.encode_cx1(urandom(32) + b"\x04" + point[1:]),
+    ]:
+        resp = _post(client, name, cx1=cx1, sig=address_proof(p, "register", name, cx1))
+        assert _reason(resp) == "Invalid cx1.", cx1
 
 
 def test_registration_lowercases_a_mixed_case_username(client: TestClient):
-    """A registered username is always stored normalized - 'Kevin'
-    registers as 'kevin', so every lookup site (which also lowercases its
-    own input) resolves it the same way regardless of how a client
-    capitalized either side."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "kevin")
-    resp = client.post(f"/p/Kevin?cx1={cx1}&sig={sig}")
-    assert resp.json() == {"status": "OK"}
-    assert notes.username_branch("kevin") == bech32m.decode_cx1(cx1).hex()
-    assert notes.username_branch("Kevin") is None  # stored lowercase, not as typed
+    name = fresh_username("mixed")
+    p, cx1 = make_share()
+    resp = _post(client, name.upper(), cx1=cx1, sig=address_proof(p, "register", name, cx1))
+    assert resp == {"status": "OK"}
+    assert notes.username_branch(name) is not None
 
 
-def test_lnaddress_lookup_is_case_insensitive(client: TestClient):
-    """A payer's client capitalizing the local-part differently than how
-    it was registered (e.g. Alice@host vs alice@host) must still resolve -
-    LUD-16 local-parts are conventionally case-insensitive."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "liam")
-    client.post(f"/p/liam?cx1={cx1}&sig={sig}")
-    lower = client.get("/.well-known/lnurlp/liam").json()
-    mixed = client.get("/.well-known/lnurlp/Liam").json()
-    upper = client.get("/.well-known/lnurlp/LIAM").json()
-    assert lower["tag"] == mixed["tag"] == upper["tag"] == "payRequest"
+def test_a_registration_is_never_overwritten(client: TestClient):
+    name = fresh_username("once")
+    _, cx1 = register_share(client, name)
+    p2, cx1_2 = make_share()
+    for queried in [name, name.upper()]:
+        resp = _post(client, queried, cx1=cx1_2, sig=address_proof(p2, "register", name, cx1_2))
+        assert _reason(resp) == "already registered"
+    share = bech32m.decode_cx1(cx1)
+    assert share is not None
+    assert notes.username_branch(name) == share.hex()
 
 
-def test_registered_lnaddress_case_insensitive_duplicate_rejected(client: TestClient):
-    """Registering 'Noah' after 'noah' is already taken normalizes to the
-    same row, so it hits the overwrite path - and without an ownership
-    proof for the branch already on file, that's rejected, not a silent
-    second, differently-cased identity for the same logical username."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "noah")
-    assert client.post(f"/p/noah?cx1={cx1}&sig={sig}").json()["status"] == "OK"
-    _, _, _, cx1_2 = _branch()
-    resp = client.post(f"/p/Noah?cx1={cx1_2}&sig={_BOGUS_SIG}")
-    assert resp.json()["status"] == "ERROR"
-    assert notes.username_branch("noah") == bech32m.decode_cx1(cx1).hex()
+def test_a_share_registered_once_is_refused_under_another_name(client: TestClient):
+    name, other = fresh_username("first"), fresh_username("second")
+    p, cx1 = make_share()
+    assert _post(client, name, cx1=cx1, sig=address_proof(p, "register", name, cx1)) == {"status": "OK"}
+    resp = _post(client, other, cx1=cx1, sig=address_proof(p, "register", other, cx1))
+    assert _reason(resp) == "cx1 already used"
 
 
-def test_mint_username_config_is_case_insensitive(client: TestClient):
-    """This mint's own fixed identity (settings.username) resolves the
-    same way regardless of how a payer's client capitalized it."""
-    assert client.get(f"/.well-known/lnurlp/{settings.username.upper()}").json()["tag"] == "payRequest"
-    assert client.get(f"/.well-known/lnurlp/{settings.username.capitalize()}").json()["tag"] == "payRequest"
+# ---- NIP-05 ----
 
 
-def test_automint_works_with_mixed_case_username_in_callback(client: TestClient, node: FakeNode):
-    """The exact bug this test guards: the callback URL carries whatever
-    case the lnaddress lookup was queried with, and the auto-mint path
-    (NoteStore.claim_next_index) must still find the registered branch's
-    row even though it was stored lowercase - previously this raised
-    'Unknown username.' internally for any non-lowercase query."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "oscar")
-    client.post(f"/p/oscar?cx1={cx1}&sig={sig}")
-
-    lnaddress = client.get("/.well-known/lnurlp/Oscar").json()
-    assert lnaddress["callback"] == "http://testserver/p/Oscar"
-
-    pay_response = client.get(f"{lnaddress['callback']}?amount=5000")
-    assert pay_response.json().get("pr"), pay_response.text
-    node.settled.add(_payment_hash(node))
-
-    expected_pk = derivation.derive_pubkey(branch_point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0)
-    expected_cp1 = bech32m.encode_cp1(expected_pk)
-    data = client.get(f"/w?p={expected_cp1}").json()
-    assert data.get("maxWithdrawable") == 5000, data
+def test_register_with_npub_serves_nip05(client: TestClient):
+    name = fresh_username("nip")
+    pubkey, npub = _npub()
+    p, cx1 = make_share()
+    assert _post(client, name, cx1=cx1, sig=address_proof(p, "register", name, cx1), npub=npub) == {"status": "OK"}
+    assert client.get(f"/.well-known/nostr.json?name={name}").json() == {"names": {name: pubkey.hex()}}
+    # case-insensitive, but the queried name is echoed back
+    upper = name.upper()
+    assert client.get(f"/.well-known/nostr.json?name={upper}").json() == {"names": {upper: pubkey.hex()}}
 
 
-def test_delete_requires_ownership_proof(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "percy")
-    client.post(f"/p/percy?cx1={cx1}&sig={sig}")
-    resp = client.delete(f"/p/percy?sig={_BOGUS_SIG}")
-    assert resp.json()["status"] == "ERROR"
-    assert notes.username_branch("percy") is not None
+def test_register_without_npub_has_no_nip05_name(client: TestClient):
+    name = fresh_username("nonip")
+    register_share(client, name)
+    assert client.get(f"/.well-known/nostr.json?name={name}").json() == {"names": {}}
+    assert client.get("/.well-known/nostr.json").json() == {"names": {}}
 
 
-def test_delete_with_valid_signature_frees_the_username(client: TestClient):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig0 = _ownership_sig(p, branch_point, chain_code, "register", "quincy")
-    client.post(f"/p/quincy?cx1={cx1}&sig={sig0}")
-    sig = _ownership_sig(p, branch_point, chain_code, "unregister", "quincy")
-    resp = client.delete(f"/p/quincy?sig={sig}")
-    assert resp.json() == {"status": "OK"}
-    assert notes.username_branch("quincy") is None
-
-    # freed: anyone can claim it again - still needs to prove it controls
-    # the NEW branch being submitted, same as any other fresh claim
-    # (register is never proof-free, not even right after a delete)
-    p2, branch_point2, chain_code2, cx1_2 = _branch()
-    sig2 = _ownership_sig(p2, branch_point2, chain_code2, "register", "quincy")
-    assert client.post(f"/p/quincy?cx1={cx1_2}&sig={sig2}").json()["status"] == "OK"
+def test_register_rejects_a_malformed_npub(client: TestClient):
+    name = fresh_username("badnpub")
+    p, cx1 = make_share()
+    resp = _post(client, name, cx1=cx1, sig=address_proof(p, "register", name, cx1), npub="npub1nope")
+    assert _reason(resp) == "Invalid npub."
 
 
-def test_delete_unknown_username_404s(client: TestClient):
-    resp = client.delete(f"/p/nobody?sig={_BOGUS_SIG}")
-    assert resp.json() == {"status": "ERROR", "reason": "Unknown user."}
+def test_npub_registration_follows_the_nip05_switch(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "nip05_enabled", False)
+    name = fresh_username("off")
+    p, cx1 = make_share()
+    _, npub = _npub()
+    resp = _post(client, name, cx1=cx1, sig=address_proof(p, "register", name, cx1), npub=npub)
+    assert _reason(resp) == "npub registration (NIP-05) is disabled on this mint."
+    # without one it still registers, and the endpoint itself is gone
+    assert _post(client, name, cx1=cx1, sig=address_proof(p, "register", name, cx1)) == {"status": "OK"}
+    assert _reason(client.get(f"/.well-known/nostr.json?name={name}").json()) == "Not found"
 
 
-def test_register_signature_cannot_be_replayed_as_unregister(client: TestClient):
-    """25.md requires the ownership proof to bind the action
-    ("register:" vs "unregister:") into the signed message, not just the
-    branch - otherwise a signature published to authorize an overwrite
-    (e.g. visible in a GET request log) could be replayed to delete the
-    same username outright."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", "sybil")
-    client.post(f"/p/sybil?cx1={cx1}&sig={sig}")
-    resp = client.delete(f"/p/sybil?sig={sig}")
-    assert resp.json()["status"] == "ERROR"
-    assert notes.username_branch("sybil") is not None
-
-
-def test_ownership_signature_cannot_be_replayed_across_usernames(client: TestClient):
-    """A signature proving ownership of one username registered on a
-    branch must not authorize an overwrite/delete of a DIFFERENT username
-    that happens to share that same branch - 25.md binds `username` into
-    the signed message specifically to prevent this."""
-    p, branch_point, chain_code, cx1 = _branch()
-    sig_tanya = _ownership_sig(p, branch_point, chain_code, "register", "tanya")
-    sig_ursula = _ownership_sig(p, branch_point, chain_code, "register", "ursula")
-    client.post(f"/p/tanya?cx1={cx1}&sig={sig_tanya}")
-    client.post(f"/p/ursula?cx1={cx1}&sig={sig_ursula}")
-    sig_for_tanya = _ownership_sig(p, branch_point, chain_code, "unregister", "tanya")
-    resp = client.delete(f"/p/ursula?sig={sig_for_tanya}")
-    assert resp.json()["status"] == "ERROR"
-    assert notes.username_branch("ursula") is not None
-
-
-def test_delete_disabled_while_username_registration_disabled(client: TestClient, monkeypatch):
-    p, branch_point, chain_code, cx1 = _branch()
-    sig0 = _ownership_sig(p, branch_point, chain_code, "register", "river")
-    client.post(f"/p/river?cx1={cx1}&sig={sig0}")
-    sig = _ownership_sig(p, branch_point, chain_code, "unregister", "river")
+def test_registration_disabled_hides_everything(client: TestClient, monkeypatch):
+    name = fresh_username("hidden")
+    _, npub = _npub()
+    p, cx1 = make_share()
+    assert _post(client, name, cx1=cx1, sig=address_proof(p, "register", name, cx1), npub=npub) == {"status": "OK"}
     monkeypatch.setattr(settings, "username_registration_enabled", False)
-    resp = client.delete(f"/p/river?sig={sig}")
-    assert resp.json() == {"status": "ERROR", "reason": "Not found"}
+    assert _reason(client.get(_address(name)).json()) == "unknown user"
+    assert client.get(f"/.well-known/nostr.json?name={name}").json() == {"names": {}}
+    assert _reason(_post(client, fresh_username("new"), cx1=cx1, sig="00" * 64)) == "Not found"
+    assert _reason(_delete(client, name, sig="00" * 64)) == "Not found"
+
+
+# ---- the address ----
+
+
+def test_a_registered_address_is_an_ordinary_lightning_address(client: TestClient):
+    """No comment (it could never reach the holder), no key of the share
+    (LUD-26 dropped text/cpub), the same withdrawLink and fees as the mint,
+    and a +tag lands on the same share."""
+    name = fresh_username("addr")
+    _, cx1 = register_share(client, name)
+    for queried in [name, name.upper(), f"{name}+coffee"]:
+        resp = client.get(_address(queried)).json()
+        assert resp["callback"] == f"http://testserver/p/{name}", queried
+        assert resp["withdrawLink"] == "http://testserver/w"
+        assert resp.get("commentAllowed") is None
+        assert "text/cpub" not in resp["metadata"] and cx1 not in resp["metadata"]
+        metadata = json.loads(resp["metadata"])
+        assert ["text/identifier", f"{name}@testserver"] in metadata
+
+
+def test_mint_is_always_the_mints_own_address(client: TestClient):
+    resp = client.get(_address("mint")).json()
+    assert resp["callback"] == "http://testserver/p/cb"
+    assert resp["commentAllowed"] == 64
+
+
+def test_an_unregistered_username_is_unknown(client: TestClient):
+    assert _reason(client.get(_address(fresh_username("nobody"))).json()) == "unknown user"
+
+
+# ---- update ----
+
+
+def test_a_put_moves_the_address_to_a_new_share(client: TestClient, node: FakeNode):
+    name = fresh_username("mover")
+    p0, cx1_0 = register_share(client, name)
+    p1, cx1_1 = make_share()
+    newsig = address_proof(p1, "register", name, cx1_1)
+
+    # the key on file must sign the update, over the new cx1
+    for sig in [
+        address_proof(p1, "update", name, cx1_1),
+        address_proof(p0, "update", name, make_share()[1]),
+        address_proof(p0, "register", name, cx1_1),
+    ]:
+        assert _reason(_put(client, name, cx1=cx1_1, sig=sig, newsig=newsig)) == "Invalid ownership signature."
+    sig = address_proof(p0, "update", name, cx1_1)
+    # and the new share its own register message
+    assert _reason(_put(client, name, cx1=cx1_1, sig=sig, newsig=sig)) == "Invalid ownership signature."
+    assert _put(client, name, cx1=cx1_1, sig=sig, newsig=newsig) == {"status": "OK"}
+    share = bech32m.decode_cx1(cx1_1)
+    assert share is not None
+    assert notes.username_branch(name) == share.hex()
+
+    # auto-mint now lands on the new share, from its index 0
+    payment_hash = _pay(client, node, name)
+    settle_polled(node, payment_hash)
+    assert _note_value(client, share_note(cx1_1, 0)) == _net(21_000)
+    assert _note_value(client, share_note(cx1_0, 0)) is None
+
+    # the old share is never accepted again
+    other = fresh_username("taker")
+    resp = _post(client, other, cx1=cx1_0, sig=address_proof(p0, "register", other, cx1_0))
+    assert _reason(resp) == "cx1 already used"
+
+
+def test_a_put_for_an_unregistered_username_is_unknown(client: TestClient):
+    name = fresh_username("ghost")
+    p, cx1 = make_share()
+    resp = _put(
+        client,
+        name,
+        cx1=cx1,
+        sig=address_proof(p, "update", name, cx1),
+        newsig=address_proof(p, "register", name, cx1),
+    )
+    assert _reason(resp) == "unknown user"
+
+
+def test_a_put_never_moves_to_a_share_accepted_before(client: TestClient):
+    first, second = fresh_username("one"), fresh_username("two")
+    p0, _ = register_share(client, first)
+    p1, cx1_1 = register_share(client, second)
+    resp = _put(
+        client,
+        first,
+        cx1=cx1_1,
+        sig=address_proof(p0, "update", first, cx1_1),
+        newsig=address_proof(p1, "register", first, cx1_1),
+    )
+    assert _reason(resp) == "cx1 already used"
+
+
+# ---- unregister ----
+
+
+def test_delete_with_the_key_on_file_frees_the_username(client: TestClient):
+    name = fresh_username("bye")
+    p, cx1 = register_share(client, name)
+    for sig in [address_proof(PrivateKey(), "unregister", name), address_proof(p, "register", name, cx1)]:
+        assert _reason(_delete(client, name, sig=sig)) == "Invalid ownership signature."
+    assert _reason(_delete(client, name)) == "Missing sig."
+    assert _delete(client, name, sig=address_proof(p, "unregister", name)) == {"status": "OK"}
+    assert _reason(client.get(_address(name)).json()) == "unknown user"
+    # free for a fresh share, never for the old one
+    assert _reason(_post(client, name, cx1=cx1, sig=address_proof(p, "register", name, cx1))) == "cx1 already used"
+    register_share(client, name)
+
+
+def test_delete_of_an_unregistered_username_is_unknown(client: TestClient):
+    assert _reason(_delete(client, fresh_username("none"), sig="00" * 64)) == "unknown user"
+
+
+# ---- auto-mint ----
+
+
+def test_an_address_payment_credits_the_shares_next_note_when_it_settles(client: TestClient, node: FakeNode):
+    """LUD-26's Crediting: the note is picked when the payment settles,
+    never when the invoice is issued, so unpaid invoices leave no unused
+    index behind - here the second invoice, paid first, takes index 0."""
+    name = fresh_username("erin")
+    _, cx1 = register_share(client, name)
+    first = _pay(client, node, name, 21_000)
+    second = _pay(client, node, name, 30_000)
+    # nothing is named, let alone credited, before a payment settles
+    assert _note_value(client, share_note(cx1, 0)) is None
+    settle_polled(node, second)
+    assert _note_value(client, share_note(cx1, 0)) == _net(30_000)
+    settle_polled(node, first)
+    assert _note_value(client, share_note(cx1, 1)) == _net(21_000)
+    # settling again credits nothing more
+    settle_polled(node, first)
+    assert _note_value(client, share_note(cx1, 2)) is None
+
+
+def test_auto_mint_skips_a_share_note_somebody_already_holds(client: TestClient, node: FakeNode):
+    name = fresh_username("skip")
+    _, cx1 = register_share(client, name)
+    # a note minted the ordinary way onto the share's index 0
+    taken = bech32m.encode_cp1(bytes.fromhex(share_note(cx1, 0)))
+    assert client.get(f"/p/cb?amount=21000&comment={taken}").json().get("pr")
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+    assert _note_value(client, share_note(cx1, 0)) == _net(21_000)
+
+    payment_hash = _pay(client, node, name, 30_000)
+    settle_polled(node, payment_hash)
+    assert _note_value(client, share_note(cx1, 1)) == _net(30_000)
+
+
+def test_a_comment_is_ignored_for_a_registered_address(client: TestClient, node: FakeNode):
+    """It names no output there: the payment always lands on the share."""
+    name = fresh_username("nocomment")
+    _, cx1 = register_share(client, name)
+    _, decoy = make_share()
+    decoy_note = bech32m.encode_cp1(bytes.fromhex(share_note(decoy, 0)))
+    resp = client.get(f"/p/{name.upper()}?amount=21000&comment={decoy_note}").json()
+    assert resp.get("pr"), resp
+    settle_polled(node, sha256(node.last_preimage).hexdigest())
+    assert _note_value(client, share_note(cx1, 0)) == _net(21_000)
+    assert _note_value(client, share_note(decoy, 0)) is None
+
+
+def test_verify_settles_an_address_mint_too(client: TestClient, node: FakeNode, monkeypatch):
+    """LUD-21: an address mint's preimage redeems nothing, so verify is
+    offered, and asking it settles the mint as the poll does."""
+    monkeypatch.setattr(settings, "verify_enabled", True)
+    name = fresh_username("verify")
+    _, cx1 = register_share(client, name)
+    payment_hash = _pay(client, node, name)
+    node.settled.add(payment_hash)
+    assert client.get(f"/verify/{payment_hash}").json()["settled"] is True
+    assert _note_value(client, share_note(cx1, 0)) == _net(21_000)
+
+
+# ---- internal transfer ----
+
+
+def test_an_internal_transfer_credits_the_payees_next_note(client: TestClient, mint_note):
+    """LUD-26: a payer holding a note on this mint sends the note itself to
+    the address's callback. Its full value lands, free of fees, on the
+    share's next unused note, which the payer never learns."""
+    name = fresh_username("ivan")
+    _, cx1 = register_share(client, name)
+    k1 = mint_note(20_000)
+    value = client.get(f"/w?k1={k1}").json()["maxWithdrawable"]
+
+    # the whole note, never part of it
+    part = client.get(f"/p/{name}?amount={value - 1000}&k1={k1}").json()
+    assert "full value" in _reason(part)
+    uri = f"/p/{name}+tip?amount={value}&k1={k1}"
+    assert client.get(uri).json() == {"status": "OK"}
+    assert _note_value(client, share_note(cx1, 0)) == value
+    assert _reason(client.get(f"/w?k1={k1}").json()) == "already in use"
+    # a retry is answered as the first and credits nothing more
+    assert client.get(uri).json() == {"status": "OK"}
+    assert _note_value(client, share_note(cx1, 1)) is None
+
+
+def test_an_internal_transfer_needs_a_registered_address(client: TestClient, mint_note):
+    k1 = mint_note(20_000)
+    value = client.get(f"/w?k1={k1}").json()["maxWithdrawable"]
+    for name in [fresh_username("nobody"), "mint"]:
+        assert _reason(client.get(f"/p/{name}?amount={value}&k1={k1}").json()) == "unknown user"
+    assert client.get(f"/w?k1={k1}").json()["maxWithdrawable"] == value
+
+
+def test_an_internal_transfer_stays_within_the_addresses_range(client: TestClient, mint_note):
+    name = fresh_username("small")
+    register_share(client, name)
+    k1 = mint_note(20_000)
+    for amount in [router_module._min_sendable_msat() - 1, settings.max_sendable_msat + 1]:
+        resp = client.get(f"/p/{name}?amount={amount}&k1={k1}").json()
+        assert _reason(resp) == "Amount outside what this address accepts."
+
+
+# ---- registered before LUD-26 ----
+
+
+def test_a_pre_lud26_address_keeps_working_until_it_is_moved(client: TestClient, node: FakeNode, mint_note):
+    """A username registered before LUD-26 holds the superseded 64-byte cx1
+    = x(P) || chain_code. It keeps auto-minting under the old purpose-2
+    tweak, so it does not stop working the day this mint upgrades, and its
+    owner moves it to a share with an update signed by the old branch key."""
+    name = fresh_username("legacy")
+    branch_key = PrivateKey()
+    point, chain_code = branch_key.public_key.format(compressed=True)[1:], urandom(32)
+    notes.register_username(name, (point + chain_code).hex(), point.hex())
+
+    payment_hash = _pay(client, node, name)
+    settle_polled(node, payment_hash)
+    old_note = derivation.legacy_derive_pubkey(point, chain_code, derivation.PURPOSE_LIGHTNING_ADDRESS, 0)
+    assert _note_value(client, old_note.hex()) == _net(21_000)
+
+    p1, cx1_1 = make_share()
+    resp = _put(
+        client,
+        name,
+        cx1=cx1_1,
+        sig=address_proof(branch_key, "update", name, cx1_1),
+        newsig=address_proof(p1, "register", name, cx1_1),
+    )
+    assert resp == {"status": "OK"}
+    k1 = mint_note(20_000)
+    value = client.get(f"/w?k1={k1}").json()["maxWithdrawable"]
+    assert client.get(f"/p/{name}?amount={value}&k1={k1}").json() == {"status": "OK"}
+    assert _note_value(client, share_note(cx1_1, 0)) == value
+
+
+def test_shares_on_file_are_accepted_keys_once_the_store_opens(tmp_path):
+    """Every share registered before accepted_keys existed is in it, in
+    either cx1 shape, so none is registered a second time."""
+    path = str(tmp_path / "old.db")
+    store = NoteStore(path)
+    legacy = (b"\xaa" * 32 + b"\xcc" * 32).hex()
+    current = (b"\xcc" * 32 + b"\x02" + b"\xbb" * 32).hex()
+    store.conn.execute("DROP TABLE accepted_keys")
+    store.conn.execute("INSERT INTO usernames (username, cx1) VALUES ('old', ?), ('new', ?)", (legacy, current))
+    store.conn.commit()
+    reopened = NoteStore(path)
+    for xp in ["aa" * 32, "bb" * 32]:
+        try:
+            reopened.register_username(fresh_username("carol"), "ff", xp)
+        except ValueError as exc:
+            assert str(exc) == "cx1 already used"
+        else:
+            raise AssertionError(f"{xp} was accepted twice")
+
+
+# ---- the spec's own vectors ----
+
+
+def test_registration_proofs_match_the_lud26_vectors():
+    """lnurl/luds 26-vectors.json: register account 0 share 0, update to
+    share 1, unregister with share 1 - each verified against its share's
+    x(P), and against no other."""
+    registration = json.loads((VECTORS / "26-vectors.json").read_text())["registration"]
+    domain, username = registration["domain"], registration["username"]
+    old, new = (bech32m.decode_cx1(registration[key]) for key in ("cx1", "new_cx1"))
+    assert old is not None and new is not None
+    for proof, action, cx1, signer in [
+        (registration["register"], "register", registration["cx1"], old[33:]),
+        (registration["update"]["sig"], "update", registration["new_cx1"], old[33:]),
+        (registration["update"]["newsig"], "register", registration["new_cx1"], new[33:]),
+        (registration["unregister"], "unregister", None, new[33:]),
+    ]:
+        assert sha256(proof["message"].encode()).hexdigest() == proof["digest"]
+        assert verify_register_signature(signer, proof["sig"], action, domain, username, cx1), action
+        other = new[33:] if signer == old[33:] else old[33:]
+        assert not verify_register_signature(other, proof["sig"], action, domain, username, cx1), action

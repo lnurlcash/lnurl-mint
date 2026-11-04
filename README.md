@@ -23,13 +23,14 @@ a reference wallet implementation (hosted at
 | `GET /`         | one-pager frontend: mint QR code (LNURL of the LUD-16 address), lightning address, mint limits, node info incl. capacity and mempool.space/amboss.space links |
 | `GET /.well-known/lnurlp/{username}` | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement) - the mint is payable at `{USERNAME}@{BASE_URL host}` (or the reserved bare-domain `_@{BASE_URL host}`, see below), and this is its only payRequest entry point (no separate bare `/p`) |
 | `GET /p/cb`   | LUD-06 callback for this mint's own fixed identity - invoice that credits the note named by `comment` (`cp1<Q>`, or a bearer hash) once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
-| `GET /p/{username}` | the same LUD-06 callback, for a registered `{username}` instead (see `POST /p/{username}` below) - no `?username=` query parameter, the path itself says which branch to auto-mint into. Takes a NIP-57 zap request as `nostr=`, see "Zaps" below |
+| `GET /p/{username}` | the same LUD-06 callback, for a registered `{username}` instead (see registration below) - no `?username=` query parameter, the path itself says which share to auto-mint into. With `k1=` in place of an invoice request, [LUD-26](../luds/26.md)'s internal transfer. Takes a NIP-57 zap request as `nostr=`, see "Zaps" below |
 | `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb`/`/p/{username}` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
 | `GET /.well-known/lnurlw/{username}` | **Theoretical/experimental**: withdraw-side mirror of the LUD-16 address - informational only, see below |
-| `POST /p/{username}` | [LUD-25](../luds/25.md): claims `{username}` for a WALLET's own `cx1` branch, so paying its lightning address auto-mints, or overwrites an existing claim's branch/npub wholesale - see "Wallet-side ownership proofs" below |
-| `DELETE /p/{username}` | frees an existing `{username}` claim entirely, back to first-come-first-served - see "Wallet-side ownership proofs" below |
+| `POST /.well-known/lnurlp/{username}` | [LUD-26](../luds/26.md): registers `{username}` for one of a WALLET's shares (form body `cx1`, `sig`, optional `npub`), so paying its lightning address auto-mints - never overwrites, see registration below |
+| `PUT /.well-known/lnurlp/{username}` | LUD-26: moves a registered `{username}` to a new share without freeing it (form body `cx1`, `sig`, `newsig`) |
+| `DELETE /.well-known/lnurlp/{username}` | LUD-26: frees `{username}` (form body `sig`), back to first-come-first-served |
 | `GET /.well-known/nostr.json` | [NIP-05](https://github.com/nostr-protocol/nips/blob/master/05.md), `?name=`: a registered username that also supplied an `npub` resolves as a Nostr identifier too - see "NIP-05" below |
 
 **Bare-domain address** ([LUD-16](../luds/16.md)): both well-known aliases
@@ -186,64 +187,57 @@ when this mint credited the note. That is custodial policy, never a proof.
 A `cw1` that opens a real note but fails a script or time check is refused
 with that *specific* reason - a `cw1` discloses its whole secret already, so
 explaining its failure can't help anyone guess another. Everything else that
-fails to resolve (a bad `ck1` signature, a note that never existed, or one
-already burned) stays in the same ambiguous "Invalid or already spent k1."
+fails to resolve (a bad `ck1` signature, or a note that never existed) stays
+in the same ambiguous "Invalid or already spent k1."; a note already burned
+is answered "already in use", which LUD-25 fixes and a LUD-26 recovery scan
+counts as a used index.
 
-**cx1 registration & lightning-address auto-mint** (`POST /p/{username}`): a
-WALLET claims `{username}` against its own `?cx1=`. A fresh, unclaimed name is
-first-come-first-served, no proof of possession required - `cx1` alone never
-grants spending, only a note's own private key does, so a squatted
-registration only costs the real owner a friendly name, never funds. Once
-registered, paying `{username}@{BASE_URL host}` always
-auto-mints a fresh `cp1` note directly on that branch (this mint derives the
-next unused key itself - `NoteStore.claim_next_index`, skipping any index
-already outstanding or spent, guarding the same race the spec's Seed &
-derivation describes) - no per-payment WALLET involvement needed at all. Its
-payRequest doesn't advertise `commentAllowed`, and a `comment` sent anyway is
-ignored rather than rejected: honoring a payer-supplied `cp1<pk>` or bearer
-hash there would mint the payment to whoever named it instead of the address
-owner. Minting to a key of your own choosing goes through the fixed identity
-(`USERNAME`/`_`) instead, where `comment` stays mandatory. Set `USERNAME_REGISTRATION_ENABLED=false` to turn this
-off entirely (404, same off-switch convention as `VERIFY_ENABLED`) - this
-mint's own fixed identity (`USERNAME`/the bare-domain `_`) is never affected
-either way. A registered username is always stored lowercase and matched
-case-insensitively (same as `USERNAME` itself, see above) - `Alice`,
-`alice` and `ALICE` all resolve to the same identity regardless of which
-one a payer's client happened to send.
+**Lightning Address registration & auto-mint** ([LUD-26](../luds/26.md)): a
+WALLET registers `{username}` at the very address it claims, `POST
+/.well-known/lnurlp/{username}` with a form body: `cx1`, one of its shares
+(an extended public key, `chain_code || P`), and `sig`, a BIP-340 signature by
+that share's own key over `sha256("LNURLcash:register:<domain>:<username>:<cx1>")`.
+`domain` is this mint's hostname, so a proof one mint saw is never replayed
+at another, and binding the `cx1` stops it from putting any other chain code
+around the same key. A registration is never overwritten ("already
+registered"), and a share this mint ever accepted is never registered again
+("cx1 already used"), so a captured proof never applies twice. `mint`, `_`
+and `USERNAME` are the mint's own address and never registrable, nor is any
+name with a `+`: `{username}+{tag}` is the same address.
 
-**Internal mint transfers**: a registered username's payRequest metadata
-additionally carries a `["text/cpub", "<cx1>:<i>"]` entry - that same branch's
-own `cx1`, plus `i`, this mint's best-known next-unused index on it. A payer
-who already holds a `cp1`/`ck1` note on this same mint can read that straight
-off the recipient's Lightning Address and skip Lightning entirely: derive
-`pk_i` from `(cx1, i)` itself and name it as `p1`/`p2` on an ordinary
-rotate/split/merge, moving value between two notes on this mint with no
-invoice, no payment, and no round trip through the funding source at all. `i`
-is only a hint, not a reservation - if it's stale or another transfer already
-claimed it, the request fails exactly like any other already-in-use `p1`, and
-the sender just retries at the next index.
+Once registered, paying `{username}@{BASE_URL host}` auto-mints a note on the
+share's next unused key, which this mint derives itself with BIP-32 CKDpub
+and picks only when the payment settles, never when the invoice is issued, so
+unpaid invoices leave no unused index behind (a background poll settles these
+invoices, since no lookup can name their note before then; LUD-21 verify does
+too). It skips any index already outstanding or burned. Its payRequest
+advertises no `commentAllowed` and publishes no key of the share, and a
+`comment` sent anyway is ignored rather than rejected. Set
+`USERNAME_REGISTRATION_ENABLED=false` to turn this off entirely (404, same
+off-switch convention as `VERIFY_ENABLED`). A registered username is always
+stored lowercase and matched case-insensitively.
 
-Calling `POST /p/{username}` again on an **already-registered** name
-overwrites it wholesale (new `cx1`, and a new or absent `npub` - see NIP-05
-below) instead of claiming it fresh - and that path needs proof: `?sig=`, a
-recoverable signature made with the branch **currently on file**'s own
-index-0 secret key ("the first secret", the same key `claim_next_index`
-would hand a note out under first), over `LNURLcash:register:<username>`,
-wrapped the same "Lightning Signed Message" way every other signature here is
-(see Offline verification above) - deliberately a *different* message than a
-note's own spend (which signs a transaction sighash), and binding both the action
-and the username into it so a signature captured from one overwrite/delete
-can never be replayed against a different username sharing that branch, or
-against the other action for that same one. It proves continued control of
-what is registered already, not of the new `cx1` being switched to, so a
-WALLET migrating to a new seed only needs to still hold its old one long
-enough to sign this once. `DELETE /p/{username}?sig=...` frees the name
-entirely (back to unclaimed, first-come-first-served) with the same kind of
-signature required instead, over `LNURLcash:unregister:<username>` - there is
-no proof-free way to delete a name someone else may depend on.
+**Internal mint transfers** (LUD-26): a payer holding a note on this mint
+sends the note itself to the address's callback, `GET
+/p/{username}?amount=<the note's full value>&k1=<spend>`, instead of paying an
+invoice. The note is burned and its full value credited, free of fees, to the
+share's next unused key, which the payer never learns; a retry is answered as
+the first. To pay part of a note, split off the exact amount first.
+
+`PUT /.well-known/lnurlp/{username}` moves a registered name to a new share
+without ever freeing it: form body `cx1` (the new share), `sig` by the key on
+file over `LNURLcash:update:<domain>:<username>:<new cx1>`, and `newsig` by the
+new share over the register message. Auto-mint then starts over at the new
+share's index 0. `DELETE /.well-known/lnurlp/{username}` with `sig` by the key
+on file over `LNURLcash:unregister:<domain>:<username>` frees the name.
+
+A username registered before LUD-26 holds the old 64-byte `cx1` and keeps
+auto-minting under the old purpose-2 tweak, so it keeps working through the
+upgrade; its owner moves it to a share with a `PUT` signed by the old branch
+key.
 
 **NIP-05** ([nostr-protocol/nips#05](https://github.com/nostr-protocol/nips/blob/master/05.md),
-optional): `POST /p/{username}` also takes `?npub=` - a WALLET's own Nostr
+optional): registration also takes `npub` - a WALLET's own Nostr
 public key, NIP-19 bech32-encoded - which doubles `{username}@{BASE_URL host}`
 as a Nostr identifier too, not just a Lightning Address. `GET
 /.well-known/nostr.json?name={username}` then resolves it, the same query
@@ -251,8 +245,7 @@ any NIP-05-aware Nostr client already makes. Only ever answers the one `name`
 asked about (never this mint's whole directory, even with no `name` at all),
 and only for a username that supplied an `npub` - an unregistered or
 `npub`-less name just comes back as an empty map, NIP-05's own "not found",
-never a 404. Omitting `npub` on an overwrite (see above) clears any
-previously registered one. Set `NIP05_ENABLED=false` to turn this off
+never a 404. Set `NIP05_ENABLED=false` to turn this off
 entirely (404, same off-switch convention as `VERIFY_ENABLED`) - `?npub=` is
 then rejected outright at registration too, rather than stored for an
 endpoint that won't resolve it. Independent of

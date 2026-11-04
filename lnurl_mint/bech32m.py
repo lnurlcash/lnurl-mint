@@ -1,6 +1,7 @@
 from bech32 import CHARSET, bech32_decode, bech32_hrp_expand, bech32_polymod, convertbits
 from bolt11.exceptions import Bolt11AmountInvalidException
 from bolt11.utils import amount_to_msat, msat_to_amount
+from coincurve import PublicKey
 
 # LUD-25 Encoding: cp1/ck1/cw1/cs1/cx1 are BIP-350 bech32m (not classic
 # bech32 - that's LUD-01's `lnurl_encode` in frontend.py, a different
@@ -125,15 +126,36 @@ def decode_cs1(s: str) -> tuple[int, bytes] | None:
     if not _verify_checksum(found_hrp, data):
         return None
     decoded = convertbits(data[:-6], 5, 8, False)
-    if decoded is None or len(decoded) != 65:
+    # r || s || recovery-id, the recovery id 0 to 3 (LUD-25's Encoding)
+    if decoded is None or len(decoded) != 65 or decoded[64] > 3:
         return None
     return amount_msat, bytes(decoded)
 
 
-# cx1<P || chaincode>: a 64-byte watch-only export of a WALLET's derivation
-# branch for one SERVICE - never appears in a mint interaction itself, only
-# on POST /p/{username}.
-encode_cx1, decode_cx1 = _fixed_length_codec("cx", 64)
+# cx1<chain_code || P>: a share's 65-byte extended public key (LUD-26), P
+# compressed, BIP-32's own order - never appears in a mint interaction
+# itself, only on a Lightning Address registration (router.py's
+# POST/PUT /.well-known/lnurlp/{username}). A payload whose P is not a
+# compressed curve point decodes to None: no note could ever be derived
+# from it.
+encode_cx1, _decode_cx1_bytes = _fixed_length_codec("cx", 65)
+
+
+def decode_cx1(s: str) -> bytes | None:
+    data = _decode_cx1_bytes(s)
+    if data is None or data[32] not in (2, 3):
+        return None
+    try:
+        PublicKey(data[32:])
+    except ValueError:
+        return None
+    return data
+
+
+# the superseded 64-byte cx1<x(P) || chain_code>, from before LUD-26: never
+# accepted for a registration any more, only read back off a username
+# registered under it (see router._share_on_file)
+encode_legacy_cx1, decode_legacy_cx1 = _fixed_length_codec("cx", 64)
 
 
 def decode_npub(s: str) -> bytes | None:

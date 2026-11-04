@@ -36,14 +36,17 @@ def lightning_signed_message_digest(message: str) -> bytes:
     return sha256(sha256(_LIGHTNING_SIGNED_MESSAGE_PREFIX + message.encode()).digest()).digest()
 
 
-def _message(note_id_hex: str, amount_msat: int) -> str:
+def _message(note_id_hex: str, domain: str, amount_msat: int) -> str:
     """The message a note's `cs1` certificate commits to, per LUD-25's
-    Offline verification: "LNURLcash:<amount_msat>:<hex(Q)>". `note_id_hex`
+    Offline verification: "LNURLcash:<domain>:<amount_msat>:<hex(Q)>",
+    `domain` this mint's lowercase hostname, the string its canonical spend
+    transaction commits to, so a certificate never vouches for a note at
+    another mint (luds 92abbb3). `note_id_hex`
     is the note's output key Q, lowercase hex - this mint's own storage id,
     and exactly what the `cp1` a WALLET disclosed decodes to - so a holder
     can prove issuance without revealing the spend, and this mint never
     needs a secret to produce or verify one: it never has one."""
-    return f"{_DOMAIN_TAG}:{amount_msat}:{note_id_hex}"
+    return f"{_DOMAIN_TAG}:{domain}:{amount_msat}:{note_id_hex}"
 
 
 async def mint_pubkey(config: LightningBackendConfig) -> str | None:
@@ -74,8 +77,8 @@ async def mint_pubkey(config: LightningBackendConfig) -> str | None:
     return info.uri.split("@")[0] if info.uri else None
 
 
-async def sign_note(note_id_hex: str, amount_msat: int, config: LightningBackendConfig) -> str | None:
-    """A recoverable signature over (note_id_hex, amount_msat) per LUD-25's
+async def sign_note(note_id_hex: str, domain: str, amount_msat: int, config: LightningBackendConfig) -> str | None:
+    """A recoverable signature over (domain, note_id_hex, amount_msat) per LUD-25's
     Offline verification, signed by the funding source node's own
     signmessage RPC, as 65 bytes (r, then s, then recovery id),
     hex-encoded. `note_id_hex` is the note's output key Q - for a
@@ -90,7 +93,7 @@ async def sign_note(note_id_hex: str, amount_msat: int, config: LightningBackend
     if not config.backend:
         return None
     try:
-        r_s, recovery_id = await sign_message(_message(note_id_hex, amount_msat), config)
+        r_s, recovery_id = await sign_message(_message(note_id_hex, domain, amount_msat), config)
     except Exception as exc:
         # not raised (see this function's own docstring) but must not
         # vanish with zero trace either - a signing RPC that always fails
@@ -103,7 +106,7 @@ async def sign_note(note_id_hex: str, amount_msat: int, config: LightningBackend
     return (r_s + bytes([recovery_id])).hex()
 
 
-def verify_note(pubkey_hex: str, note_id_hex: str, amount_msat: int, signature_hex: str) -> bool:
+def verify_note(pubkey_hex: str, note_id_hex: str, domain: str, amount_msat: int, signature_hex: str) -> bool:
     """Verifies a signature produced by sign_note against a mintPubkey - the
     check a WALLET performs offline, by reconstructing the same "Lightning
     Signed Message" digest lnd/cln computed internally when signing.
@@ -112,7 +115,7 @@ def verify_note(pubkey_hex: str, note_id_hex: str, amount_msat: int, signature_h
     test suite to confirm sign_note produces what the spec's algorithm
     expects."""
     signature = bytes.fromhex(signature_hex)
-    digest = lightning_signed_message_digest(_message(note_id_hex, amount_msat))
+    digest = lightning_signed_message_digest(_message(note_id_hex, domain, amount_msat))
     recovered = PublicKey.from_signature_and_message(signature, digest, hasher=None)
     return recovered.format(compressed=True).hex() == pubkey_hex
 
@@ -126,43 +129,43 @@ def _schnorr_digest(message: str) -> bytes:
     return sha256(message.encode()).digest()
 
 
-# A username registration's ownership proof (router.py's POST/DELETE
-# /p/{username}): a WALLET's signature, with the branch's own index-0
-# secret key ("the first secret" - the same key claim_next_index would
-# hand out first, before this ever needed proving), over
-# sha256("LNURLcash:register:<domain>:<username>") (to overwrite an
-# existing claim) or sha256("LNURLcash:unregister:<domain>:<username>")
-# (to delete one), per 25.md's Seed & derivation - hashed for the same
-# 32-byte-message reason _schnorr_digest's own docstring gives, `username`
-# being variable-length. Domain-separated from a note's own spend (which
-# signs a transaction sighash, never a text message), so a note's
-# redemption signature can never be replayed here, or vice versa; `action`/`username` fold in so a
-# signature captured from one overwrite/delete can never be replayed
-# against a different username sharing this branch, or against the other
-# action for that same username; and `domain` (the SERVICE's own full
-# domain name, LUD-05 style - router._owns_branch passes the requesting
-# mint's own resolved host) so a proof captured by one mint can never be
-# replayed by it against a different one.
-def _register_message(action: str, domain: str, username: str) -> str:
-    return f"{_DOMAIN_TAG}:{action}:{domain}:{username}"
+# A Lightning Address registration's ownership proof (LUD-26, router.py's
+# POST/PUT/DELETE /.well-known/lnurlp/{username}): a BIP-340 signature by a
+# share's own key p (S/a'/2/n'), verified against x(P) of a cx1, over
+#
+#   sha256("LNURLcash:register:<domain>:<username>:<cx1>")      POST, and a PUT's newsig
+#   sha256("LNURLcash:update:<domain>:<username>:<new cx1>")    a PUT's sig, by the key on file
+#   sha256("LNURLcash:unregister:<domain>:<username>")          DELETE, by the key on file
+#
+# hashed for the same 32-byte-message reason _schnorr_digest's own docstring
+# gives. Domain-separated from a note's own spend (which signs a transaction
+# sighash, never a text message); `action` and `username` fold in so a proof
+# never applies to another action or name; `domain` (this mint's own
+# hostname) so a proof captured by one mint is never replayed at another;
+# and `cx1` so a proof never puts another chain code or parity byte around
+# the same x(P) on file, nor redirects an update anywhere else.
+def _register_message(action: str, domain: str, username: str, cx1: str | None) -> str:
+    if action == "unregister":
+        return f"{_DOMAIN_TAG}:unregister:{domain}:{username}"
+    return f"{_DOMAIN_TAG}:{action}:{domain}:{username}:{cx1}"
 
 
-def verify_register_signature(pubkey: bytes, signature_hex: str, action: str, domain: str, username: str) -> bool:
+def verify_register_signature(
+    pubkey: bytes, signature_hex: str, action: str, domain: str, username: str, cx1: str | None
+) -> bool:
     """Whether `signature_hex` is a valid registration ownership-proof
-    Schnorr signature by `pubkey` (the branch's own index-0 public key,
-    already derived by the caller from the cx1 on file - router._owns_branch)
-    over sha256(_register_message(action, domain, username)). `action` is
-    "register" (upsert_registered_username's overwrite path) or
-    "unregister" (delete_registered_username). Unlike the note-redemption
-    path, there is no legacy fallback here: SERVICE derives `pubkey` itself
-    from `cx1` rather than trusting one embedded in the request, so nothing
-    about this check's shape needed to change for the schnorr switch beyond
-    the signature itself. False (never raises) on a malformed signature."""
+    Schnorr signature by `pubkey` (an x(P), 32 bytes: the cx1 being
+    registered, or the one on file - router._proves picks which) over
+    sha256(_register_message(action, domain, username, cx1)). `username`
+    is lowercase and `cx1` its canonical lowercase spelling, as signed.
+    False (never raises) on a malformed signature."""
     try:
         signature = bytes.fromhex(signature_hex)
     except ValueError:
         return False
     try:
-        return PublicKeyXOnly(pubkey).verify(signature, _schnorr_digest(_register_message(action, domain, username)))
+        return PublicKeyXOnly(pubkey).verify(
+            signature, _schnorr_digest(_register_message(action, domain, username, cx1))
+        )
     except ValueError:
         return False

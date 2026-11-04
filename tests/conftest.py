@@ -52,6 +52,7 @@ from fastapi.testclient import TestClient
 import lnurl_mint.node as node_module
 import lnurl_mint.router as router_module
 import lnurl_mint.signing as signing_module
+from lnurl_mint import bech32m, derivation
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from lnurl_mint.node import NodeInfo, PaymentFailed, PaymentResult
@@ -352,3 +353,60 @@ def melt_in_background(client: TestClient, k1: str, pr: str, monkeypatch: pytest
         assert melt_recorded.wait(timeout=5), "melt never recorded its melts row"
     thread.result = result  # type: ignore[attr-defined]
     return thread
+
+
+# ---- LUD-26 shares and their proofs ----
+#
+# A share is all this mint ever sees of a WALLET's tree: its cx1, chain_code
+# || P. A test needs no seed for one - any key and chain code make a share -
+# only its key p, to sign the share's own registration proofs.
+
+
+def fresh_username(prefix: str = "user") -> str:
+    """A username no other test registered (the test database is shared
+    across the session, and so is every share key it ever accepted)."""
+    return f"{prefix}{urandom(4).hex()}"
+
+
+def make_share() -> tuple[PrivateKey, str]:
+    """A fresh share: its key p, and its cx1 = bech32m(chain_code || P)."""
+    p = PrivateKey()
+    return p, bech32m.encode_cx1(urandom(32) + p.public_key.format(compressed=True))
+
+
+def address_proof(p: PrivateKey, action: str, username: str, cx1: str | None = None, domain: str = "testserver") -> str:
+    """A share's ownership proof (signing.verify_register_signature): BIP-340
+    by `p` over sha256 of "LNURLcash:register:<domain>:<username>:<cx1>",
+    "LNURLcash:update:<domain>:<username>:<new cx1>" or
+    "LNURLcash:unregister:<domain>:<username>". `domain` defaults to the
+    TestClient's own host, which the mint folds into every proof."""
+    if action == "unregister":
+        message = f"LNURLcash:unregister:{domain}:{username}"
+    else:
+        message = f"LNURLcash:{action}:{domain}:{username}:{cx1}"
+    return sign_schnorr_message(p, sha256(message.encode()).digest()).hex()
+
+
+def register_share(client: TestClient, username: str) -> tuple[PrivateKey, str]:
+    """Register a fresh share under `username` at its own address, as a
+    WALLET does (LUD-26: a form-encoded POST), and return it."""
+    p, cx1 = make_share()
+    sig = address_proof(p, "register", username, cx1)
+    resp = client.post(f"/.well-known/lnurlp/{username}", data={"cx1": cx1, "sig": sig})
+    assert resp.json() == {"status": "OK"}, resp.text
+    return p, cx1
+
+
+def share_note(cx1: str, index: int) -> str:
+    """hex(Q) of the share's note `index`: what this mint credits there."""
+    share = bech32m.decode_cx1(cx1)
+    assert share is not None
+    return derivation.derive_note_pubkey(share, index).hex()
+
+
+def settle_polled(node: "FakeNode", payment_hash: str) -> None:
+    """Have the funding source report `payment_hash` paid, then run the
+    settlement poll that credits a registered address's mint (see
+    router.settle_polled_mints)."""
+    node.settled.add(payment_hash)
+    asyncio.run(router_module.settle_polled_mints())

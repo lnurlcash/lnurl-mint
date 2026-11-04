@@ -11,52 +11,17 @@ from os import urandom
 from typing import Any
 
 import pytest
-from coincurve import PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from lnurl_mint import bech32m, derivation, nostr
+from lnurl_mint import nostr
 from lnurl_mint import router as router_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import FakeNode, sign_schnorr_message
+from tests.conftest import FakeNode, fresh_username, register_share
 
 MINT_KEY = urandom(32).hex()
 RELAYS = ["wss://relay.example", "wss://nos.example"]
-
-# secp256k1 group order - see test_username_registration.py's own copy of
-# this constant/helper for the full rationale (BIP-340 x-only tweak).
-_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-
-# matches conftest.py's BASE_URL ("http://testserver") host - see
-# test_username_registration.py's own copy of this constant.
-_DOMAIN = "testserver"
-
-
-def _ownership_sig(p: PrivateKey, branch_point: bytes, chain_code: bytes, action: str, username: str) -> str:
-    # signs sha256(message), a 32-byte digest, not the raw message itself -
-    # see test_username_registration.py's own copy of this helper for the
-    # full rationale, and signing._schnorr_digest
-    d = p.to_int()
-    if p.public_key.format(compressed=True)[0] == 0x03:
-        d = _N - d
-    tweak = int.from_bytes(
-        derivation.tagged_hash(
-            b"LNURLcash/derive",
-            branch_point + chain_code + derivation.PURPOSE_WALLET.to_bytes(4, "big") + (0).to_bytes(4, "big"),
-        ),
-        "big",
-    )
-    sk0 = PrivateKey.from_int((d + tweak) % _N)
-    digest = sha256(f"LNURLcash:{action}:{_DOMAIN}:{username}".encode()).digest()
-    return sign_schnorr_message(sk0, digest).hex()
-
-
-def _branch() -> tuple[PrivateKey, bytes, bytes, str]:
-    p = PrivateKey()
-    branch_point = p.public_key.format(compressed=True)[1:]
-    chain_code = urandom(32)
-    return p, branch_point, chain_code, bech32m.encode_cx1(branch_point + chain_code)
 
 
 def _zap_request(amount_msat: int | None = 21_000, recipient: str | None = None, **overrides: Any) -> dict[str, Any]:
@@ -91,10 +56,8 @@ def zaps(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> list[tuple[list
 
 def _register(client: TestClient) -> str:
     """A fresh username each time: the store outlives one test."""
-    username = f"zap{urandom(4).hex()}"  # .hex() is always lowercase already
-    p, branch_point, chain_code, cx1 = _branch()
-    sig = _ownership_sig(p, branch_point, chain_code, "register", username)
-    assert client.post(f"/p/{username}?cx1={cx1}&sig={sig}").json() == {"status": "OK"}
+    username = fresh_username("zap")
+    register_share(client, username)
     return username
 
 
@@ -193,11 +156,11 @@ def test_an_ordinary_address_payment_publishes_nothing(client: TestClient, node:
     pr = client.get(f"/p/{username}", params={"amount": 21_000}).json()["pr"]
     payment_hash = sha256(node.last_preimage).hexdigest()
     node.settled.add(payment_hash)
-    # not a zap, so the poll leaves it to settle lazily as ever; verify settles it here
+    # not a zap, but an address mint names its note only when it settles
+    # (LUD-26), so the poll settles it too - and publishes nothing for it
     _receipts(node)
-    assert not notes.mint_settled(payment_hash)
+    assert notes.mint_settled(payment_hash)
     assert client.get(f"/verify/{payment_hash}").json()["settled"] is True
-    _receipts(node)
     assert _receipt_for(zaps, pr) is None and notes.zap_receipt_id(payment_hash) is None
 
 
@@ -257,9 +220,9 @@ def test_the_settlement_poll_is_bounded(client: TestClient, node: FakeNode, zaps
     for _ in range(3):
         client.get(f"/p/{username}", params={"amount": 21_000, "nostr": json.dumps(_zap_request())})
     monkeypatch.setattr(router_module, "_ZAP_POLL_LIMIT", 2)
-    assert len(notes.pending_zap_mints(0, router_module._ZAP_POLL_LIMIT)) == 2
+    assert len(notes.pending_polled_mints(0, router_module._ZAP_POLL_LIMIT)) == 2
     # an invoice older than the window is not polled, however new the rest are
-    assert notes.pending_zap_mints(int(time.time()) + 10**9, 100) == []
+    assert notes.pending_polled_mints(int(time.time()) + 10**9, 100) == []
 
 
 def test_zaps_stay_off_on_spark(client: TestClient, zaps, monkeypatch):

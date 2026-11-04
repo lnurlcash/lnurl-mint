@@ -14,7 +14,7 @@ def _certifies(pubkey: str, h: str, amount_msat: int, cs1: str) -> bool:
     `amount_msat` - checked against the claimed amount, not the one the
     certificate's own HRP carries, so a wrong claim fails."""
     decoded = bech32m.decode_cs1(cs1)
-    return decoded is not None and verify_note(pubkey, bearer_id(h), amount_msat, decoded[1].hex())
+    return decoded is not None and verify_note(pubkey, bearer_id(h), "testserver", amount_msat, decoded[1].hex())
 
 
 def test_cs1_matches_lud25_spec_test_vector_4():
@@ -28,34 +28,38 @@ def test_cs1_matches_lud25_spec_test_vector_4():
     generated keys via a FakeNode - deterministic, but never against a
     value anything outside this file could reproduce."""
     mint_pubkey = "035acdbd57663f858be6d61ec4bfcbc99492699010f1451e30a6550f26295e813d"
-    pk = "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634"
+    pk = "690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f"
+    domain = "mint.example"
 
-    digest_1000 = lightning_signed_message_digest(f"LNURLcash:1000:{pk}")
-    assert digest_1000.hex() == "30894ad113df18b1e00a27015ed62e8b94a87498c8da7997ddac48e4cd7bb20f"
+    digest_1000 = lightning_signed_message_digest(f"LNURLcash:{domain}:1000:{pk}")
+    assert digest_1000.hex() == "084dbb1bf4c84e6bb08da9c283208f07c546305855e74f06834adc7257c3644b"
     sig_1000 = (
-        "41a69c2e826555b1c5c099b3166e8d50cc3bbba3ccb9b87c377e96ae070d532c3b6230194ae97d322d663fb38266abd2"
-        "6f3553c62a7d5a528ce9c72d3838fffc01"
+        "8863e702d6a676cde369439645104dc793106eec12d1bde8f13a7d95d3079c560fe39eff7edf0b7b4ccee16a7273b737"
+        "3b04c813b0cfd1e297e2d7a9ba0bce9901"
     )
-    assert verify_note(mint_pubkey, pk, 1000, sig_1000)
+    assert verify_note(mint_pubkey, pk, domain, 1000, sig_1000)
     assert bech32m.encode_cs1(1000, bytes.fromhex(sig_1000)) == (
-        "cs10n1gxnfct5zv42mr3wqnxe3vm5d2rxrhwarejumslph06t2upcd2vkrkc3sr99wjlfj94nrlvuzv64ayme420rz5l2622xwn3ed8qu0llqpeg9n5x"
+        "cs10n13p37wqkk5emvmcmfgwty2yzdc7f3qmhvztgmm6838f7et5c8n3tqlcu7lald7zmmfn8wz6njwwmnwwcyeqfmpn73u2t794afhg9uaxgpyam087"
     )
 
-    digest_21m = lightning_signed_message_digest(f"LNURLcash:21000000:{pk}")
-    assert digest_21m.hex() == "6186fd2c1c258a6c0a3627e895efbc3d0988325c4f36f0050b52b4c4751ab13d"
+    digest_21m = lightning_signed_message_digest(f"LNURLcash:{domain}:21000000:{pk}")
+    assert digest_21m.hex() == "cdda839535b2705e17d5587c1cfde7ae50df8afaeba822a9ea898cc7fdc86049"
     sig_21m = (
-        "b5c6c3dd151708501bc8820ae00ef3d6439cdcca8bac00fb2675fee6b89a7767079e37f62c2502c6744a56295c459d52c"
-        "0475e27a0eb34745790b44c54b9386200"
+        "2b3b440e3befbf3632f006b497d0a57fcb23eca47bc33531b7baf74f4d922cc863fff6a9cd1c5deda86751509b57c68d"
+        "a6a51a92e1d3ab6acb5a3eca369f365000"
     )
-    assert verify_note(mint_pubkey, pk, 21000000, sig_21m)
+    assert verify_note(mint_pubkey, pk, domain, 21000000, sig_21m)
     assert bech32m.encode_cs1(21000000, bytes.fromhex(sig_21m)) == (
-        "cs210u1khrv8hg4zuy9qx7gsg9wqrhn6epeehx23wkqp7exwhlwdwy6wans083h7ckz2qkxw399v22ugkw49sz8tcn6p6e5w3tepdzv2junscsqwvvr03"
+        "cs210u19va5gr3ma7lnvvhsq66f05990l9j8m9y00pn2vdhhtm57nvj9nyx8llk48x3ch0d4pn4z5ym2lrgmf49r2fwr5atdt9450k2x60nv5qqt2u5km"
     )
 
     # cross-amount replay must fail - amount is folded into the signed
     # message itself, not carried alongside it as an unverified label
-    assert not verify_note(mint_pubkey, pk, 21000000, sig_1000)
-    assert not verify_note(mint_pubkey, pk, 1000, sig_21m)
+    assert not verify_note(mint_pubkey, pk, domain, 21000000, sig_1000)
+    assert not verify_note(mint_pubkey, pk, domain, 1000, sig_21m)
+    # and so is the domain: a certificate never vouches for the note at
+    # another mint (luds 92abbb3)
+    assert not verify_note(mint_pubkey, pk, "other.example", 1000, sig_1000)
 
 
 def test_mint_pubkey_absent_without_a_funding_source(client: TestClient, mint_note, monkeypatch):
